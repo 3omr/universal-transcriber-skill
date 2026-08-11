@@ -1,0 +1,17 @@
+# This repository publishes the transcriber code, not medical course data.
+*
+
+!.gitignore
+!README.md
+
+!.agents/
+!.agents/skills/
+!.agents/skills/universal-transcriber/
+!.agents/skills/universal-transcriber/SKILL.md
+!.agents/skills/universal-transcriber/scripts/
+!.agents/skills/universal-transcriber/scripts/run_transcription.py
+
+!universal_transcriber/
+universal_transcriber/*
+!universal_transcriber/universal_transcribe.py
+!universal_transcriber/config.example.json
