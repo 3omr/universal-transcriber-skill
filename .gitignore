@@ -8,8 +8,18 @@
 !.agents/skills/
 !.agents/skills/universal-transcriber/
 !.agents/skills/universal-transcriber/SKILL.md
+!.agents/skills/universal-transcriber/agents/
+!.agents/skills/universal-transcriber/agents/openai.yaml
+!.agents/skills/universal-transcriber/references/
+!.agents/skills/universal-transcriber/references/modules.md
 !.agents/skills/universal-transcriber/scripts/
 !.agents/skills/universal-transcriber/scripts/run_transcription.py
+!.agents/skills/universal-transcriber/scripts/manage_modules.py
+!.agents/skills/universal-transcriber/scripts/module_registry.py
+
+!tests/
+!tests/test_module_registry.py
+!tests/test_transcriber.py
 
 !universal_transcriber/
 universal_transcriber/*

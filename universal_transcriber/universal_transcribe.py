@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Universal medical lecture transcriber backed by NotebookLM MCP."""
+"""Universal medical lecture transcriber backed by the NotebookLM CLI."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import selectors
 import shutil
 import subprocess
 import sys
@@ -15,7 +14,6 @@ import tempfile
 import time
 import unicodedata
 import urllib.parse
-import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,21 +24,23 @@ from xml.etree import ElementTree
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 
-MCP_BROWSER_TIMEOUT_MS = 180_000
-MCP_RESPONSE_TIMEOUT_SECONDS = 205
+NLM_QUERY_TIMEOUT_SECONDS = 205
 MAX_ATTEMPTS = 3
 EXAM_YEARS = {2021, 2022, 2023, 2024}
 
 ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 RECORDING_EXTENSIONS = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".mkv", ".ogg"}
+NLM_RECORDING_UPLOAD_EXTENSIONS = RECORDING_EXTENSIONS - {".mkv"}
 SLIDE_EXTENSIONS = {".ppt", ".pptx", ".ppsx"}
-MCP_UPLOAD_EXTENSIONS = {
+DOCUMENT_UPLOAD_EXTENSIONS = {
     ".pdf",
     ".pptx",
-    ".ppsx",
     ".docx",
     ".txt",
 }
+NLM_UPLOAD_EXTENSIONS = (
+    DOCUMENT_UPLOAD_EXTENSIONS | NLM_RECORDING_UPLOAD_EXTENSIONS | {".md"}
+)
 
 ALLOWED_CALLOUTS = {"NOTE", "IMPORTANT", "WARNING", "CAUTION", "TIP"}
 IMP_HEADINGS = (
@@ -69,8 +69,8 @@ class Phase0Error(TranscriberError):
     """Raised when the source audit cannot establish safe inputs."""
 
 
-class MCPError(TranscriberError):
-    """Raised when an MCP operation cannot produce a valid result."""
+class NlmError(TranscriberError):
+    """Raised when the NotebookLM CLI cannot produce a valid result."""
 
 
 class ValidationError(TranscriberError):
@@ -179,6 +179,23 @@ class PhaseQuery:
     query_text: str
     phase_name: str
     validator: Callable[[QueryResult], list[str]]
+    source_ids: tuple[str, ...] = ()
+    source_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NlmQueryRequest:
+    config: dict[str, Any]
+    notebook: NotebookTarget
+    query_text: str
+    source_ids: tuple[str, ...]
+    source_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class QueryScope:
+    source_ids: tuple[str, ...]
+    source_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -228,6 +245,8 @@ class PipelineContext:
     badge_instructions: str
     verified_years: set[int]
     evidence_sources: list[str]
+    guide_scope: QueryScope
+    assessment_scope: QueryScope
 
 
 @dataclass(frozen=True)
@@ -255,7 +274,9 @@ def load_config() -> dict[str, Any]:
     return {
         "default_subject": "Toxicology",
         "notebook_ids": {},
-        "mcp_wrapper_path": "/home/omar/notebooklm-mcp-server/run_mcp.py",
+        "nlm_executable": "nlm",
+        "nlm_profile": None,
+        "modules_root": "modules",
         "transcripts_root": "Transcripts",
         "emoji_by_subject": {},
     }
@@ -272,180 +293,6 @@ def get_project_dir() -> str:
     return parent
 
 
-def get_mcp_wrapper_path(config: dict[str, Any]) -> str:
-    configured = config.get("mcp_wrapper_path")
-    if configured and os.path.exists(configured):
-        return str(configured)
-
-    environment_path = os.environ.get("NOTEBOOKLM_MCP_PATH")
-    if environment_path and os.path.exists(environment_path):
-        return environment_path
-
-    candidates = (
-        "/home/omar/notebooklm-mcp-server/run_mcp.py",
-        os.path.expanduser("~/notebooklm-mcp-server/run_mcp.py"),
-        os.path.join(SCRIPT_DIR, "notebooklm-mcp-server", "run_mcp.py"),
-    )
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate
-    raise MCPError("NotebookLM MCP wrapper was not found. Set NOTEBOOKLM_MCP_PATH.")
-
-
-def _read_jsonrpc_response(
-    process: subprocess.Popen[str], expected_id: int, timeout_seconds: int
-) -> dict[str, Any]:
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not selector.select(remaining):
-                raise TimeoutError(
-                    f"MCP response {expected_id} exceeded {timeout_seconds} seconds"
-                )
-            line = process.stdout.readline()
-            if not line:
-                raise MCPError("MCP server closed before returning a response")
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if response.get("id") == expected_id:
-                return response
-    finally:
-        selector.close()
-
-
-def _stop_mcp_process(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-
-
-def _parse_json_text(raw_text: str) -> Any:
-    stripped = raw_text.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        starts = [index for index in (stripped.find("{"), stripped.find("[")) if index >= 0]
-        if not starts:
-            return stripped
-        start = min(starts)
-        for end_character in ("}", "]"):
-            end = stripped.rfind(end_character)
-            if end > start:
-                try:
-                    return json.loads(stripped[start : end + 1])
-                except json.JSONDecodeError:
-                    continue
-        return stripped
-
-
-def _decode_mcp_response(response: dict[str, Any]) -> Any:
-    if "error" in response:
-        raise MCPError(f"MCP JSON-RPC error: {response['error']}")
-    rpc_result = response.get("result", {})
-    content = rpc_result.get("content", []) if isinstance(rpc_result, dict) else []
-    if not content:
-        raise MCPError("MCP tool returned no content")
-    first = content[0]
-    raw_text = first.get("text", "") if isinstance(first, dict) else str(first)
-    if not raw_text:
-        raise MCPError("MCP tool returned empty text content")
-    return _parse_json_text(raw_text)
-
-
-def _mcp_process(config: dict[str, Any]) -> subprocess.Popen[str]:
-    process = subprocess.Popen(
-        [get_mcp_wrapper_path(config)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
-    if process.stdin is None or process.stdout is None:
-        _stop_mcp_process(process)
-        raise MCPError("Could not open MCP process streams")
-    return process
-
-
-def _write_jsonrpc(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
-    if process.stdin is None:
-        raise MCPError("MCP stdin closed unexpectedly")
-    process.stdin.write(json.dumps(message) + "\n")
-    process.stdin.flush()
-
-
-def _initialize_mcp_session(process: subprocess.Popen[str]) -> None:
-    _write_jsonrpc(
-        process,
-        {
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "universal-transcriber", "version": "2.0"},
-            },
-            "id": 1,
-        },
-    )
-    _read_jsonrpc_response(process, 1, 30)
-    _write_jsonrpc(
-        process, {"jsonrpc": "2.0", "method": "notifications/initialized"}
-    )
-
-
-def _invoke_mcp_tool(
-    process: subprocess.Popen[str],
-    tool_name: str,
-    arguments: dict[str, Any],
-    timeout_seconds: int,
-) -> Any:
-    _write_jsonrpc(
-        process,
-        {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
-            "id": 2,
-        },
-    )
-    return _decode_mcp_response(_read_jsonrpc_response(process, 2, timeout_seconds))
-
-
-def call_mcp_tool(
-    config: dict[str, Any],
-    tool_name: str,
-    arguments: dict[str, Any],
-    timeout_seconds: int = 90,
-) -> Any:
-    process = _mcp_process(config)
-    try:
-        _initialize_mcp_session(process)
-        return _invoke_mcp_tool(process, tool_name, arguments, timeout_seconds)
-    except TimeoutError as error:
-        raise MCPError(str(error)) from error
-    finally:
-        _stop_mcp_process(process)
-
-
-def _successful_tool_payload(payload: Any, operation: str) -> Any:
-    if not isinstance(payload, dict):
-        raise MCPError(f"{operation} returned an unexpected payload")
-    if payload.get("success") is False:
-        raise MCPError(f"{operation} failed: {payload.get('error', 'unknown error')}")
-    return payload.get("data", payload)
-
-
 def _extract_notebook_uuid(notebook_reference: str) -> str:
     match = re.search(
         r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -455,102 +302,121 @@ def _extract_notebook_uuid(notebook_reference: str) -> str:
     return match.group(0).lower() if match else ""
 
 
-def _notebook_entries(library_payload: Any) -> list[dict[str, Any]]:
-    library_content = _successful_tool_payload(library_payload, "list_notebooks")
-    candidates = (
-        library_content.get("notebooks", [])
-        if isinstance(library_content, dict)
-        else []
-    )
-    if not isinstance(candidates, list) or not candidates:
-        raise Phase0Error("NotebookLM library is empty or could not be enumerated")
-    return [candidate for candidate in candidates if isinstance(candidate, dict)]
+def _find_nlm_executable(config: dict[str, Any] | None = None) -> str:
+    configured = str((config or {}).get("nlm_executable") or "nlm")
+    if os.path.isabs(configured) and os.path.isfile(configured):
+        return configured
+    discovered = shutil.which(configured)
+    if discovered:
+        return discovered
+    raise Phase0Error(f"The nlm CLI executable '{configured}' was not found")
+
+
+def _nlm_command(config: dict[str, Any], arguments: list[str]) -> list[str]:
+    command = [_find_nlm_executable(config), *arguments]
+    profile = config.get("nlm_profile")
+    if profile:
+        command.extend(["--profile", str(profile)])
+    return command
+
+
+def _run_nlm_json(
+    config: dict[str, Any],
+    arguments: list[str],
+    timeout_seconds: int,
+    operation: str,
+) -> Any:
+    command = _nlm_command(config, [*arguments, "--json"])
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise NlmError(f"{operation} timed out") from error
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip()
+        raise NlmError(f"{operation} failed: {message[:500]}")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise NlmError(f"{operation} returned invalid JSON") from error
+
+
+def _notebook_entries(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        raise Phase0Error("nlm notebook list returned an unexpected payload")
+    entries = [entry for entry in payload if isinstance(entry, dict) and entry.get("id")]
+    if not entries:
+        raise Phase0Error("nlm notebook list returned no notebooks")
+    return entries
 
 
 def _matching_notebook_entries(
     entries: list[dict[str, Any]], requested_id: str, subject: str
 ) -> list[dict[str, Any]]:
     requested_uuid = _extract_notebook_uuid(requested_id)
-    requested_key = requested_id.strip().casefold()
-    exact_matches: list[dict[str, Any]] = []
-    subject_matches: list[dict[str, Any]] = []
-    for notebook_entry in entries:
-        entry_id = str(notebook_entry.get("id", ""))
-        entry_url = str(notebook_entry.get("url", ""))
-        entry_uuid = _extract_notebook_uuid(entry_url)
-        if entry_id.casefold() == requested_key or (
-            requested_uuid and entry_uuid == requested_uuid
-        ):
-            exact_matches.append(notebook_entry)
-        entry_name = str(notebook_entry.get("name", "")).strip().casefold()
-        if entry_name == subject.strip().casefold():
-            subject_matches.append(notebook_entry)
-
-    if exact_matches:
-        return exact_matches
-    return subject_matches if requested_key == subject.strip().casefold() else []
+    requested_key = normalize_source_key(requested_id)
+    exact = [
+        entry
+        for entry in entries
+        if str(entry.get("id", "")).casefold() == requested_id.casefold()
+        or (requested_uuid and str(entry.get("id", "")).casefold() == requested_uuid)
+    ]
+    if exact:
+        return exact
+    title_key = requested_key or normalize_source_key(subject)
+    return [
+        entry
+        for entry in entries
+        if normalize_source_key(str(entry.get("title", ""))) == title_key
+    ]
 
 
 def _unique_notebook_summary(
     matches: list[dict[str, Any]], requested_id: str
 ) -> dict[str, Any]:
-    if len(matches) != 1:
-        if not matches:
-            raise Phase0Error(
-                f"Notebook '{requested_id}' was not found in list_notebooks"
-            )
+    if not matches:
+        raise Phase0Error(f"Notebook '{requested_id}' was not found by nlm")
+    if len(matches) > 1:
         raise Phase0Error(f"Notebook '{requested_id}' resolved ambiguously")
     return matches[0]
 
 
-def _notebook_target(
-    summary: dict[str, Any], notebook_payload: Any, requested_id: str, subject: str
-) -> NotebookTarget:
-    library_id = str(summary.get("id", ""))
-    notebook_content = _successful_tool_payload(notebook_payload, "get_notebook")
-    notebook_details = (
-        notebook_content.get("notebook", {})
-        if isinstance(notebook_content, dict)
-        else {}
-    )
-    if not isinstance(notebook_details, dict):
-        raise Phase0Error("get_notebook returned invalid notebook metadata")
-
-    url = str(notebook_details.get("url") or summary.get("url") or "")
-    notebook_uuid = _extract_notebook_uuid(url) or _extract_notebook_uuid(requested_id)
-    notebook_uuid = notebook_uuid or library_id
+def _notebook_target(payload: Any, subject: str) -> NotebookTarget:
+    if not isinstance(payload, dict):
+        raise Phase0Error("nlm notebook get returned an unexpected payload")
+    notebook_id = str(payload.get("notebook_id") or payload.get("id") or "").strip()
+    if not notebook_id:
+        raise Phase0Error("nlm notebook get returned no notebook id")
+    url = str(payload.get("url") or "").strip()
     if not url:
-        url = f"https://notebooklm.google.com/notebook/{notebook_uuid}"
+        url = f"https://notebooklm.google.com/notebook/{notebook_id}"
     return NotebookTarget(
-        library_id=library_id,
-        notebook_uuid=notebook_uuid,
+        library_id=notebook_id,
+        notebook_uuid=notebook_id,
         url=url,
-        name=str(notebook_details.get("name") or summary.get("name") or subject),
+        name=str(payload.get("title") or subject),
     )
 
 
 def resolve_notebook(
     config: dict[str, Any], requested_id: str, subject: str
 ) -> NotebookTarget:
-    library_payload = call_mcp_tool(config, "list_notebooks", {}, timeout_seconds=60)
-    entries = _notebook_entries(library_payload)
+    entries = _notebook_entries(
+        _run_nlm_json(config, ["notebook", "list"], 60, "nlm notebook list")
+    )
     summary = _unique_notebook_summary(
         _matching_notebook_entries(entries, requested_id, subject), requested_id
     )
-    notebook_payload = call_mcp_tool(
-        config, "get_notebook", {"id": str(summary.get("id", ""))}, timeout_seconds=60
+    notebook_id = str(summary.get("id", ""))
+    payload = _run_nlm_json(
+        config, ["notebook", "get", notebook_id], 60, "nlm notebook get"
     )
-    return _notebook_target(summary, notebook_payload, requested_id, subject)
-
-
-def _find_nlm_executable() -> str:
-    preferred = "/home/omar/.local/bin/nlm"
-    if os.path.exists(preferred):
-        return preferred
-    discovered = shutil.which("nlm")
-    if discovered:
-        return discovered
-    raise Phase0Error("The nlm CLI is required for live source inventory")
+    return _notebook_target(payload, subject)
 
 
 def _dictionary_entries(payload: list[Any]) -> list[dict[str, Any]]:
@@ -584,21 +450,18 @@ def _source_items(payload: Any) -> list[dict[str, Any]]:
     return _mapped_source_entries(payload)
 
 
-def _remote_source_inventory(notebook_uuid: str) -> Any:
-    command = [_find_nlm_executable(), "source", "list", notebook_uuid, "--json"]
+def _remote_source_inventory(
+    notebook_uuid: str, config: dict[str, Any] | None = None
+) -> Any:
     try:
-        completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=120, check=False
+        return _run_nlm_json(
+            config or {},
+            ["source", "list", notebook_uuid],
+            120,
+            "nlm source list",
         )
-    except subprocess.TimeoutExpired as error:
-        raise Phase0Error("nlm source list timed out") from error
-    if completed.returncode != 0:
-        message = completed.stderr.strip() or completed.stdout.strip()
-        raise Phase0Error(f"nlm source list failed: {message[:500]}")
-    try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise Phase0Error("nlm source list returned invalid JSON") from error
+    except NlmError as error:
+        raise Phase0Error(str(error)) from error
 
 
 def _remote_source_title(source_entry: dict[str, Any]) -> str:
@@ -611,9 +474,12 @@ def _remote_source_title(source_entry: dict[str, Any]) -> str:
     ).strip()
 
 
-def list_remote_sources(notebook_uuid: str) -> list[RemoteSource]:
+def list_remote_sources(
+    notebook_uuid: str, config: dict[str, Any] | None = None
+) -> list[RemoteSource]:
     remote_sources: list[RemoteSource] = []
-    for source_entry in _source_items(_remote_source_inventory(notebook_uuid)):
+    inventory = _remote_source_inventory(notebook_uuid, config)
+    for source_entry in _source_items(inventory):
         title = _remote_source_title(source_entry)
         if not title:
             continue
@@ -725,7 +591,9 @@ def _pdf_tool_failure(source: LocalSource, reason: str) -> tuple[OCRReport, tupl
     return OCRReport(source.path, "fail", reason[:500]), ()
 
 
-def _run_pdf_tools(source: LocalSource) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
+def _run_pdf_tools(
+    source: LocalSource,
+) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
     page_metadata = subprocess.run(
         ["pdfinfo", source.path], capture_output=True, text=True, timeout=60
     )
@@ -949,22 +817,6 @@ def _extension_compatible(local_extension: str, remote_title: str) -> bool:
     return False
 
 
-def _recursive_number(payload: Any, key: str) -> int | None:
-    if isinstance(payload, dict):
-        if key in payload and isinstance(payload[key], (int, float)):
-            return int(payload[key])
-        for nested_payload in payload.values():
-            found = _recursive_number(nested_payload, key)
-            if found is not None:
-                return found
-    elif isinstance(payload, list):
-        for nested_payload in payload:
-            found = _recursive_number(nested_payload, key)
-            if found is not None:
-                return found
-    return None
-
-
 def _source_exists_remotely(source: LocalSource, remote: list[RemoteSource]) -> bool:
     return any(
         remote_source.normalized_name == source.normalized_name
@@ -976,52 +828,42 @@ def _source_exists_remotely(source: LocalSource, remote: list[RemoteSource]) -> 
     )
 
 
-def _validate_upload_acknowledgement(upload_payload: Any) -> None:
-    if not isinstance(upload_payload, dict) or upload_payload.get("success") is not True:
-        message = (
-            str(upload_payload.get("error", "source_add did not report success"))
-            if isinstance(upload_payload, dict)
-            else "source_add returned an invalid payload"
-        )
-        raise MCPError(message)
-    before = _recursive_number(upload_payload, "sourceCountBefore")
-    after = _recursive_number(upload_payload, "sourceCountAfter")
-    if before is None or after is None or after <= before:
-        raise MCPError("source_add did not confirm a source-count increase")
-
-
 def _refreshed_inventory_with(
-    notebook: NotebookTarget, source: LocalSource
+    config: dict[str, Any], notebook: NotebookTarget, source: LocalSource
 ) -> list[RemoteSource]:
     for poll in range(3):
-        refreshed_sources = list_remote_sources(notebook.notebook_uuid)
+        refreshed_sources = list_remote_sources(notebook.notebook_uuid, config)
         if _source_exists_remotely(source, refreshed_sources):
             return refreshed_sources
         if poll < 2:
             time.sleep(5)
-    raise MCPError("Uploaded source was not found in refreshed inventory")
+    raise NlmError("Uploaded source was not found in refreshed inventory")
 
 
 def _send_source_upload(
     config: dict[str, Any], notebook: NotebookTarget, source: LocalSource
 ) -> None:
-    upload_payload = call_mcp_tool(
+    _run_nlm_json(
         config,
-        "source_add",
-        {
-            "source_type": "file",
-            "file_path": source.path,
-            "notebook_url": notebook.url,
-        },
-        timeout_seconds=MCP_RESPONSE_TIMEOUT_SECONDS,
+        [
+            "source",
+            "add",
+            notebook.notebook_uuid,
+            "--file",
+            source.path,
+            "--wait",
+            "--wait-timeout",
+            "900",
+        ],
+        930,
+        "nlm source add",
     )
-    _validate_upload_acknowledgement(upload_payload)
 
 
 def _retry_inventory_match(
-    notebook: NotebookTarget, source: LocalSource
+    config: dict[str, Any], notebook: NotebookTarget, source: LocalSource
 ) -> list[RemoteSource] | None:
-    refreshed_sources = list_remote_sources(notebook.notebook_uuid)
+    refreshed_sources = list_remote_sources(notebook.notebook_uuid, config)
     return refreshed_sources if _source_exists_remotely(source, refreshed_sources) else None
 
 
@@ -1033,15 +875,15 @@ def _upload_source_with_retries(
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             if attempt > 1:
-                matched_inventory = _retry_inventory_match(notebook, source)
+                matched_inventory = _retry_inventory_match(config, notebook, source)
                 if matched_inventory:
                     return UploadOutcome(matched_inventory, upload_acknowledged)
             _send_source_upload(config, notebook, source)
             upload_acknowledged = True
             return UploadOutcome(
-                _refreshed_inventory_with(notebook, source), uploaded_by_run=True
+                _refreshed_inventory_with(config, notebook, source), uploaded_by_run=True
             )
-        except (MCPError, Phase0Error) as error:
+        except (NlmError, Phase0Error) as error:
             last_error = str(error)
             if attempt < MAX_ATTEMPTS:
                 time.sleep(attempt * 5)
@@ -1059,7 +901,7 @@ def upload_missing_sources(
     uploaded: list[LocalSource] = []
     current_remote = list(remote_sources)
     for source in missing:
-        if source.extension not in MCP_UPLOAD_EXTENSIONS:
+        if source.extension not in NLM_UPLOAD_EXTENSIONS:
             continue
         outcome = _upload_source_with_retries(config, notebook, source)
         current_remote = outcome.remote_sources
@@ -1214,7 +1056,7 @@ def _print_ocr_and_matching_issues(report: Phase0Report) -> None:
     for source in report.ambiguous:
         print(f"[AMBIGUOUS] {source.relative_path}: skipped to prevent duplication")
     for source in report.unsupported:
-        print(f"[UNSUPPORTED] {source.relative_path}: not eligible for MCP upload")
+        print(f"[UNSUPPORTED] {source.relative_path}: not eligible for nlm upload")
     for blocking_error in report.blocking_errors:
         print(f"[BLOCKING] {blocking_error}")
 
@@ -1270,7 +1112,7 @@ def _new_phase0_report(
         unsupported=[
             source
             for source in local_sources
-            if source.extension not in MCP_UPLOAD_EXTENSIONS
+            if source.extension not in NLM_UPLOAD_EXTENSIONS
         ],
         year_map=build_exam_year_map(local_sources),
         question_banks=sorted(
@@ -1284,7 +1126,7 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
     notebook = resolve_notebook(
         request.config, request.requested_notebook_id, request.subject
     )
-    remote_sources = list_remote_sources(notebook.notebook_uuid)
+    remote_sources = list_remote_sources(notebook.notebook_uuid, request.config)
     local_sources = scan_local_sources(request.sources_root)
     if not local_sources:
         raise Phase0Error(
@@ -1301,11 +1143,14 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
 
 
 def _append_ocr_failures(report: Phase0Report) -> None:
+    missing_paths = {source.path for source in report.missing_before_upload}
     for source in report.local_sources:
         if source.ocr and source.ocr.status == "fail":
-            report.blocking_errors.append(
-                f"Unreadable required document '{source.relative_path}': {source.ocr.reason}"
-            )
+            if source.path in missing_paths:
+                report.blocking_errors.append(
+                    f"Unreadable document must be fixed before upload "
+                    f"'{source.relative_path}': {source.ocr.reason}"
+                )
 
 
 def _refresh_evidence_metadata(report: Phase0Report) -> None:
@@ -1375,60 +1220,74 @@ def run_phase0_audit(request: Phase0Request) -> Phase0Report:
     return report
 
 
-def _query_source_names(sources: Any) -> tuple[str, ...]:
-    source_names: list[str] = []
-    if isinstance(sources, list):
-        for source in sources:
-            if isinstance(source, dict):
-                name = str(
-                    source.get("sourceName") or source.get("source_name") or ""
-                ).strip()
-                if name and name not in source_names:
-                    source_names.append(name)
-    return tuple(source_names)
+def _reference_names(payload: Any) -> list[str]:
+    entries = payload if isinstance(payload, list) else []
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(
+            entry.get("title")
+            or entry.get("source_title")
+            or entry.get("source_name")
+            or ""
+        ).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
-def _extract_query_result(payload: Any) -> QueryResult:
-    answer_payload = _successful_tool_payload(payload, "ask_question")
-    if not isinstance(answer_payload, dict):
-        raise MCPError("ask_question returned invalid data")
-    if str(answer_payload.get("status", "success")).casefold() != "success":
-        raise MCPError(
-            f"ask_question failed: {answer_payload.get('error', 'unknown error')}"
-        )
+def _nlm_query_arguments(request: NlmQueryRequest) -> list[str]:
+    arguments = [
+        "notebook",
+        "query",
+        request.notebook.notebook_uuid,
+        request.query_text,
+        "--timeout",
+        "180",
+    ]
+    if request.source_ids:
+        arguments.extend(["--source-ids", ",".join(request.source_ids)])
+    return arguments
+
+
+def _run_nlm_cli_query(request: NlmQueryRequest) -> QueryResult:
+    payload = _run_nlm_json(
+        request.config,
+        _nlm_query_arguments(request),
+        NLM_QUERY_TIMEOUT_SECONDS,
+        "nlm notebook query",
+    )
+    if not isinstance(payload, dict):
+        raise NlmError("nlm notebook query returned an unexpected payload")
+    names = list(request.source_names)
+    for key in ("references", "sources_used"):
+        for name in _reference_names(payload.get(key, [])):
+            if name not in names:
+                names.append(name)
     return QueryResult(
-        answer=str(answer_payload.get("answer", "")).strip(),
-        source_names=_query_source_names(answer_payload.get("sources", [])),
+        answer=str(payload.get("answer", "")).strip(),
+        source_names=tuple(names),
         session_id=(
-            str(answer_payload.get("session_id"))
-            if answer_payload.get("session_id")
+            str(payload.get("conversation_id"))
+            if payload.get("conversation_id")
             else None
         ),
     )
 
 
-def _run_mcp_query_once(
-    config: dict[str, Any], notebook: NotebookTarget, query_text: str
-) -> QueryResult:
-    marker = f"USTE-{uuid.uuid4().hex[:10]}"
-    payload = call_mcp_tool(
-        config,
-        "ask_question",
-        {
-            "question": (
-                f"{query_text}\n\nInternal request marker: {marker}. "
-                "Do not include this marker in the answer."
-            ),
-            "notebook_id": notebook.library_id,
-            "source_format": "json",
-            "browser_options": {
-                "headless": True,
-                "timeout_ms": MCP_BROWSER_TIMEOUT_MS,
-            },
-        },
-        timeout_seconds=MCP_RESPONSE_TIMEOUT_SECONDS,
+def _run_query_once(query: PhaseQuery, query_text: str) -> QueryResult:
+    return _run_nlm_cli_query(
+        NlmQueryRequest(
+            config=query.config,
+            notebook=query.notebook,
+            query_text=query_text,
+            source_ids=query.source_ids,
+            source_names=query.source_names,
+        )
     )
-    return _extract_query_result(payload)
+
+
 
 
 PhaseValidator = Callable[[QueryResult], list[str]]
@@ -1458,25 +1317,34 @@ def _query_response_errors(
 
 
 def _repair_instructions(validation_errors: list[str]) -> str:
-    return (
+    instruction = (
         "\n\nREPAIR REQUIRED: The previous response was rejected for these reasons: "
         + "; ".join(validation_errors)
         + ". Return the complete section body again and obey every original format rule."
     )
+    if any("clinical-case" in error for error in validation_errors):
+        instruction += (
+            " For every case, prefix every non-empty line with > and use each required "
+            "field label exactly once."
+        )
+    if any("not concise" in error for error in validation_errors):
+        instruction += (
+            " Limit each Model Answer (Short) to 3-6 one-sentence bullets and at most "
+            "900 characters, including all quoted Markdown after that field."
+        )
+    return instruction
 
 
-def run_mcp_query(query: PhaseQuery) -> QueryResult:
+def run_nlm_query(query: PhaseQuery) -> QueryResult:
     repair_context = ""
     last_errors: list[str] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            query_result = _run_mcp_query_once(
-                query.config, query.notebook, query.query_text + repair_context
-            )
+            query_result = _run_query_once(query, query.query_text + repair_context)
             last_errors = _query_response_errors(query_result, query.validator)
             if not last_errors:
                 return query_result
-        except (MCPError, TimeoutError) as error:
+        except (NlmError, TimeoutError) as error:
             last_errors = [str(error)]
 
         if attempt < MAX_ATTEMPTS:
@@ -1503,6 +1371,70 @@ def _remote_local_names(report: Phase0Report, roles: set[str]) -> list[str]:
         for source in report.local_sources
         if source.role in roles and _source_exists_remotely(source, report.remote_sources)
     )
+
+
+def _remote_sources_for_title(
+    report: Phase0Report, source_title: str
+) -> list[RemoteSource]:
+    if not source_title:
+        return []
+    normalized_name = normalize_source_key(source_title)
+    normalized_stem = normalize_source_stem(source_title)
+    exact_matches = [
+        source
+        for source in report.remote_sources
+        if source.normalized_name == normalized_name
+    ]
+    if exact_matches:
+        return exact_matches
+    source_extension = os.path.splitext(source_title)[1].casefold()
+    return [
+        source
+        for source in report.remote_sources
+        if source.normalized_stem == normalized_stem
+        and _extension_compatible(source_extension, source.title)
+    ]
+
+
+def _remote_sources_for_local(
+    report: Phase0Report, local_source: LocalSource
+) -> list[RemoteSource]:
+    return [
+        remote_source
+        for remote_source in report.remote_sources
+        if remote_source.normalized_name == local_source.normalized_name
+        or (
+            remote_source.normalized_stem == local_source.normalized_stem
+            and _extension_compatible(local_source.extension, remote_source.title)
+        )
+    ]
+
+
+def _append_scope_source(
+    source: RemoteSource, aliases: list[str], source_ids: list[str]
+) -> None:
+    if source.source_id and source.source_id not in source_ids:
+        source_ids.append(source.source_id)
+    if source.title and source.title not in aliases:
+        aliases.append(source.title)
+
+
+def _query_scope(report: Phase0Report, local_roles: set[str]) -> QueryScope:
+    aliases: list[str] = []
+    source_ids: list[str] = []
+    authority_titles = [report.recording_source, report.slide_source]
+    for title in authority_titles:
+        for remote_source in _remote_sources_for_title(report, title):
+            _append_scope_source(remote_source, aliases, source_ids)
+
+    for local_source in report.local_sources:
+        if local_source.role not in local_roles:
+            continue
+        for remote_source in _remote_sources_for_local(report, local_source):
+            _append_scope_source(remote_source, aliases, source_ids)
+        if _source_exists_remotely(local_source, report.remote_sources):
+            aliases.append(local_source.name)
+    return QueryScope(tuple(source_ids), tuple(dict.fromkeys(aliases)))
 
 
 def build_source_context(report: Phase0Report) -> str:
@@ -1630,14 +1562,24 @@ every complete case inside its own > [!TIP] block. Every line belonging to the
 case must start with >. Each block must contain > **🩺 Clinical Case N:** with
 evidence-backed badge(s), > **Scenario:**, > **Questions:**, and
 > **Model Answer (Short):**. Ask diagnostic, investigation, findings, and/or
-management questions as appropriate. Answers must be concise numbered or
-bulleted points. A case carrying a Past Exams or Question Bank badge must also
-contain > **Source:** with the exact source name and verified year.
+management questions as appropriate. Each Model Answer must contain only 3-6
+one-sentence bullets and the entire answer after its field label must stay under
+900 characters. Use this exact quoted structure for every case:
+> [!TIP]
+> **🩺 Clinical Case N:** **[IMP]**
+> **Scenario:** concise scenario
+> **Questions:** concise numbered questions
+> **Model Answer (Short):**
+> - concise answer point
+
+A case carrying a Past Exams or Question Bank badge must also contain
+> **Source:** with the exact source name and verified year.
 
 {badge_instructions}
 Use a past-exam or question-bank badge only for a verbatim or traceably adapted
-cited scenario. Otherwise use **[IMP]** only when the recording supports the
-emphasis. Return section body only; never use # or ## headings."""
+cited scenario. Otherwise use exactly **[IMP]** only when the recording supports
+the emphasis. Never leave either side of a badge unbolded. Return section body
+only; never use # or ## headings."""
 
 
 def _body_heading_errors(text: str) -> list[str]:
@@ -2246,6 +2188,8 @@ def _argument_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
         default=config.get("default_subject", "Toxicology"),
         help="Subject/Course name",
     )
+    parser.add_argument("--emoji", help="Emoji used in the transcript filename")
+    parser.add_argument("--nlm-profile", help="Optional nlm authentication profile")
     parser.add_argument("--notebook-id", help="NotebookLM Notebook ID")
     parser.add_argument("--lecture", required=True, help="Lecture title or audio filename")
     parser.add_argument("--pptx", help="Path to PPTX or PDF slides")
@@ -2318,7 +2262,7 @@ def _run_request(
     parser: argparse.ArgumentParser,
 ) -> RunRequest:
     subject = str(args.subject)
-    emoji = config.get("emoji_by_subject", {}).get(subject, "📚")
+    emoji = args.emoji or config.get("emoji_by_subject", {}).get(subject, "📚")
     title = _lecture_title(args, str(emoji))
     project_dir = get_project_dir()
     target = _output_target(args, config, title, str(emoji))
@@ -2374,90 +2318,104 @@ def _pipeline_context(
         badge_instructions=canonical_badge_instructions(report.year_map),
         verified_years=set(report.year_map),
         evidence_sources=_remote_local_names(report, {"past_exam", "question_bank"}),
+        guide_scope=_query_scope(report, {"textbook"}),
+        assessment_scope=_query_scope(
+            report, {"textbook", "past_exam", "question_bank"}
+        ),
     )
 
 
 def _query_guide(context: PipelineContext) -> QueryResult:
     print("   - [1/5] Running Chronological Guide...")
-    return run_mcp_query(
+    return run_nlm_query(
         PhaseQuery(
-            context.config,
-            context.report.notebook,
-            build_guide_prompt(
+            config=context.config,
+            notebook=context.report.notebook,
+            query_text=build_guide_prompt(
                 context.identity.subject, context.identity.title, context.source_manifest
             ),
-            "Chronological Guide",
-            lambda query_result: validate_guide(
+            phase_name="Chronological Guide",
+            validator=lambda query_result: validate_guide(
                 query_result, context.report.recording_source
             ),
+            source_ids=context.guide_scope.source_ids,
+            source_names=context.guide_scope.source_names,
         )
     )
 
 
 def _query_imp(context: PipelineContext) -> QueryResult:
     print("   - [2/5] Running IMP Points...")
-    return run_mcp_query(
+    return run_nlm_query(
         PhaseQuery(
-            context.config,
-            context.report.notebook,
-            build_imp_prompt(context.identity.title, context.source_manifest),
-            "IMP Points",
-            validate_imp,
+            config=context.config,
+            notebook=context.report.notebook,
+            query_text=build_imp_prompt(
+                context.identity.title, context.source_manifest
+            ),
+            phase_name="IMP Points",
+            validator=validate_imp,
+            source_ids=context.guide_scope.source_ids,
+            source_names=context.guide_scope.source_names,
         )
     )
 
 
 def _query_mcqs(context: PipelineContext) -> QueryResult:
     print("   - [3/5] Running MCQs...")
-    return run_mcp_query(
+    return run_nlm_query(
         PhaseQuery(
-            context.config,
-            context.report.notebook,
-            build_mcq_prompt(
+            config=context.config,
+            notebook=context.report.notebook,
+            query_text=build_mcq_prompt(
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
             ),
-            "MCQs",
-            lambda query_result: validate_mcqs(
+            phase_name="MCQs",
+            validator=lambda query_result: validate_mcqs(
                 query_result, context.report.year_map, context.evidence_sources
             ),
+            source_ids=context.assessment_scope.source_ids,
+            source_names=context.assessment_scope.source_names,
         )
     )
 
 
 def _query_written(context: PipelineContext) -> QueryResult:
     print("   - [4/5] Running Written Questions...")
-    return run_mcp_query(
+    return run_nlm_query(
         PhaseQuery(
-            context.config,
-            context.report.notebook,
-            build_written_prompt(
+            config=context.config,
+            notebook=context.report.notebook,
+            query_text=build_written_prompt(
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
             ),
-            "Written Questions",
-            lambda query_result: validate_written(
+            phase_name="Written Questions",
+            validator=lambda query_result: validate_written(
                 query_result, context.report.year_map, context.evidence_sources
             ),
+            source_ids=context.assessment_scope.source_ids,
+            source_names=context.assessment_scope.source_names,
         )
     )
 
 
 def _query_cases(context: PipelineContext) -> QueryResult:
     print("   - [5/5] Running Clinical Cases...")
-    return run_mcp_query(
+    return run_nlm_query(
         PhaseQuery(
-            context.config,
-            context.report.notebook,
-            build_case_prompt(
+            config=context.config,
+            notebook=context.report.notebook,
+            query_text=build_case_prompt(
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
             ),
-            "Clinical Cases",
-            lambda query_result: validate_cases(
+            phase_name="Clinical Cases",
+            validator=lambda query_result: validate_cases(
                 query_result,
                 CaseEvidence(
                     context.report.year_map,
@@ -2465,6 +2423,8 @@ def _query_cases(context: PipelineContext) -> QueryResult:
                     context.report.recording_source,
                 ),
             ),
+            source_ids=context.assessment_scope.source_ids,
+            source_names=context.assessment_scope.source_names,
         )
     )
 
@@ -2514,7 +2474,10 @@ def _run_pipeline(config: dict[str, Any], request: RunRequest) -> int:
 def main() -> int:
     config = load_config()
     parser = _argument_parser(config)
-    request = _run_request(parser.parse_args(), config, parser)
+    args = parser.parse_args()
+    if args.nlm_profile:
+        config = {**config, "nlm_profile": args.nlm_profile}
+    request = _run_request(args, config, parser)
     _print_run_summary(request)
     try:
         if request.audit_only:
