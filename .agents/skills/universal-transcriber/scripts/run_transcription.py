@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
-"""Discover NotebookLM lectures and invoke the universal transcriber safely."""
+"""Resolve one module and run its NotebookLM transcription pipeline."""
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import importlib.util
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Iterator
+
+from module_registry import (
+    ModuleConfig,
+    ModuleConfigError,
+    configured_slide,
+    discover_modules,
+    resolve_module,
+)
 
 
 class LauncherError(RuntimeError):
-    """Raised when automatic discovery cannot make a unique, safe choice."""
-
-
-@dataclass(frozen=True)
-class NotebookResolution:
-    config: dict[str, Any]
-    notebook_reference: str
-    subject: str
-    register_notebook: bool
+    """Raised when automatic discovery cannot make one safe choice."""
 
 
 @dataclass(frozen=True)
@@ -38,9 +40,8 @@ class RecordingSelection:
 @dataclass(frozen=True)
 class EngineInvocation:
     engine_path: Path
-    subject: str
+    module: ModuleConfig
     notebook_id: str
-    source_root: Path
     recording: Any
     slides_path: Path | None
 
@@ -49,8 +50,8 @@ class EngineInvocation:
 class LauncherContext:
     engine_path: Path
     engine: ModuleType
-    subject: str
-    source_root: Path
+    config: dict[str, Any]
+    module: ModuleConfig
     notebook: Any
 
 
@@ -80,130 +81,44 @@ def _load_engine(engine_path: Path) -> ModuleType:
     return engine
 
 
-def _source_roots(workspace: Path) -> list[Path]:
-    candidates: list[Path] = []
-    excluded_parts = {".git", ".agents", "__pycache__", "_ocr_backups"}
-    for lecture_dir in workspace.rglob("Lecture"):
-        if not lecture_dir.is_dir() or any(
-            excluded in lecture_dir.parts for excluded in excluded_parts
-        ):
-            continue
-        course_root = lecture_dir.parent
-        if (course_root / "Questions").is_dir() or (course_root / "Exams").is_dir():
-            candidates.append(course_root)
-    return sorted(set(candidates))
-
-
-def _source_root(workspace: Path, requested: str | None) -> Path:
-    if requested:
-        source_root = Path(requested).expanduser().resolve()
-        if not (source_root / "Lecture").is_dir():
-            raise LauncherError(f"Lecture directory not found under {source_root}")
-        return source_root
-    candidates = _source_roots(workspace)
-    if len(candidates) != 1:
-        rendered = ", ".join(str(path) for path in candidates) or "none"
-        raise LauncherError(
-            "Could not select one course root. Pass --sources-root. "
-            f"Candidates: {rendered}"
-        )
-    return candidates[0]
-
-
-def _notebook_reference(
-    config: dict[str, Any], subject: str, requested: str | None
-) -> str:
-    notebook_reference = requested or config.get("notebook_ids", {}).get(subject)
-    if not notebook_reference:
-        raise LauncherError(
-            f"No notebook is configured for {subject}; pass --notebook-id"
-        )
-    return str(notebook_reference)
-
-
-def _notebook_url(engine: ModuleType, notebook_reference: str) -> str:
-    if notebook_reference.startswith("https://"):
-        return notebook_reference
-    notebook_uuid = engine._extract_notebook_uuid(notebook_reference)
-    if not notebook_uuid:
-        raise LauncherError(
-            "Registering a notebook requires a NotebookLM URL or UUID"
-        )
-    return f"https://notebooklm.google.com/notebook/{notebook_uuid}"
-
-
-def _register_notebook(
-    engine: ModuleType,
-    config: dict[str, Any],
-    notebook_reference: str,
-    subject: str,
-) -> None:
-    registration = {
-        "url": _notebook_url(engine, notebook_reference),
-        "name": subject,
-        "description": (
-            f"Medical lecture recordings, slides, references, past exams, and "
-            f"question banks for {subject}."
-        ),
-        "topics": [subject, "medical lectures", "past exams", "question banks"],
-        "content_types": ["audio", "slides", "references", "exam questions"],
-        "use_cases": [
-            "Transcribing lectures",
-            "Extracting exam questions",
-            "Creating medical study guides",
-        ],
-        "tags": ["medical", "transcription", subject.casefold()],
-    }
-    try:
-        response = engine.call_mcp_tool(
-            config, "add_notebook", registration, timeout_seconds=60
-        )
-        engine._successful_tool_payload(response, "add_notebook")
-    except engine.TranscriberError as error:
-        raise LauncherError(f"Notebook registration failed: {error}") from error
-
-
-def _registered_notebook(engine: ModuleType, resolution: NotebookResolution) -> Any:
-    _register_notebook(
-        engine,
-        resolution.config,
-        resolution.notebook_reference,
-        resolution.subject,
-    )
-    try:
-        return engine.resolve_notebook(
-            resolution.config,
-            resolution.notebook_reference,
-            resolution.subject,
-        )
-    except engine.TranscriberError as error:
-        raise LauncherError(f"Registered notebook could not be resolved: {error}") from error
+def _module_config_for_engine(
+    engine_config: dict[str, Any], module: ModuleConfig
+) -> dict[str, Any]:
+    config = dict(engine_config)
+    if module.notebook.profile:
+        config["nlm_profile"] = module.notebook.profile
+    config["default_subject"] = module.display_name
+    return config
 
 
 def _resolved_notebook(
-    engine: ModuleType, resolution: NotebookResolution
+    engine: ModuleType, config: dict[str, Any], module: ModuleConfig
 ) -> Any:
+    notebook_reference = module.notebook.notebook_id or module.notebook.title
     try:
         return engine.resolve_notebook(
-            resolution.config,
-            resolution.notebook_reference,
-            resolution.subject,
+            config, notebook_reference, module.notebook.title or module.display_name
         )
     except engine.TranscriberError as error:
-        message = str(error).casefold()
-        missing = isinstance(error, engine.Phase0Error) and (
-            "empty" in message or "not found" in message
-        )
-        if not resolution.register_notebook or not missing:
-            raise LauncherError(
-                f"{error}. Run again with --register-notebook after explicit approval."
-            ) from error
-    return _registered_notebook(engine, resolution)
+        raise LauncherError(f"Could not resolve module notebook: {error}") from error
 
 
-def _recordings(engine: ModuleType, notebook_uuid: str) -> list[Any]:
+def _launcher_context(args: argparse.Namespace) -> LauncherContext:
+    workspace = Path(args.workspace).expanduser().resolve()
+    modules = discover_modules(workspace, args.modules_root)
+    module = resolve_module(modules, args.module)
+    engine_path = _engine_path(workspace)
+    engine = _load_engine(engine_path)
+    config = _module_config_for_engine(engine.load_config(), module)
+    notebook = _resolved_notebook(engine, config, module)
+    return LauncherContext(engine_path, engine, config, module, notebook)
+
+
+def _recordings(
+    engine: ModuleType, notebook_uuid: str, config: dict[str, Any]
+) -> list[Any]:
     try:
-        remote_sources = engine.list_remote_sources(notebook_uuid)
+        remote_sources = engine.list_remote_sources(notebook_uuid, config)
     except engine.TranscriberError as error:
         raise LauncherError(f"Could not read NotebookLM sources: {error}") from error
     recordings = [
@@ -268,21 +183,12 @@ def _selected_recordings(selection: RecordingSelection) -> list[Any]:
         return pending
     names = "\n".join(f"- {source.title}" for source in pending)
     raise LauncherError(
-        "Multiple untranscribed recordings were found. Name one lecture or explicitly "
-        f"request all recordings:\n{names}"
+        "Multiple pending recordings were found. Name one or pass --all:\n" + names
     )
 
 
 def _topic_tokens(engine: ModuleType, source_name: str) -> set[str]:
-    ignored = {
-        "lecture",
-        "recording",
-        "poison",
-        "poisons",
-        "poisoning",
-        "dr",
-        "doctor",
-    }
+    ignored = {"lecture", "recording", "poison", "poisons", "poisoning", "dr"}
     return {
         token
         for token in engine.normalize_source_stem(source_name).split()
@@ -310,12 +216,42 @@ def _matching_slides(
     return Path(matches[0].path) if len(matches) == 1 else None
 
 
+def _requested_slides(requested: str, module: ModuleConfig) -> Path:
+    requested_path = Path(requested).expanduser()
+    slide_path = (
+        requested_path.resolve()
+        if requested_path.is_absolute()
+        else (module.paths.root / requested_path).resolve()
+    )
+    if not slide_path.is_file():
+        raise LauncherError(f"Slides file not found: {slide_path}")
+    return slide_path
+
+
+def _slides_path(
+    requested: str | None,
+    context: LauncherContext,
+    recording_title: str,
+) -> Path | None:
+    if requested:
+        return _requested_slides(requested, context.module)
+    try:
+        mapped = configured_slide(context.module, recording_title)
+    except ModuleConfigError as error:
+        raise LauncherError(str(error)) from error
+    return mapped or _matching_slides(
+        context.engine, context.module.paths.root, recording_title
+    )
+
+
 def _engine_command(invocation: EngineInvocation) -> list[str]:
     command = [
         sys.executable,
         str(invocation.engine_path),
         "--subject",
-        invocation.subject,
+        invocation.module.display_name,
+        "--emoji",
+        invocation.module.emoji,
         "--notebook-id",
         invocation.notebook_id,
         "--lecture",
@@ -323,20 +259,21 @@ def _engine_command(invocation: EngineInvocation) -> list[str]:
         "--recording-source",
         invocation.recording.title,
         "--sources-root",
-        str(invocation.source_root),
+        str(invocation.module.paths.root),
         "--output-dir",
-        str(invocation.source_root / "Transcripts"),
+        str(invocation.module.paths.transcripts),
     ]
     if invocation.slides_path:
         command.extend(["--pptx", str(invocation.slides_path)])
+    if invocation.module.notebook.profile:
+        command.extend(["--nlm-profile", invocation.module.notebook.profile])
     return command
 
 
 def _run_audit(command: list[str], source_root: Path) -> int:
-    audit = subprocess.run(
+    return subprocess.run(
         [*command, "--audit-only"], cwd=source_root, check=False
-    )
-    return audit.returncode
+    ).returncode
 
 
 def _run_transcription(command: list[str], source_root: Path) -> int:
@@ -354,42 +291,22 @@ def _print_inventory(recordings: list[Any], pending: list[Any]) -> None:
         print(f"- [{status}] {source.title}")
 
 
-def _launcher_context(args: argparse.Namespace) -> LauncherContext:
-    workspace = Path(args.workspace).expanduser().resolve()
-    engine_path = _engine_path(workspace)
-    engine = _load_engine(engine_path)
-    config = engine.load_config()
-    subject = str(args.subject or config.get("default_subject", "Toxicology"))
-    source_root = _source_root(workspace, args.sources_root)
-    notebook_reference = _notebook_reference(config, subject, args.notebook_id)
-    resolution = NotebookResolution(
-        config=config,
-        notebook_reference=notebook_reference,
-        subject=subject,
-        register_notebook=args.register_notebook,
-    )
-    notebook = _resolved_notebook(engine, resolution)
-    return LauncherContext(
-        engine_path=engine_path,
-        engine=engine,
-        subject=subject,
-        source_root=source_root,
-        notebook=notebook,
-    )
+def _print_modules(modules: list[ModuleConfig]) -> None:
+    print("Configured modules:")
+    for module in modules:
+        notebook = module.notebook.notebook_id or module.notebook.title
+        print(f"- {module.module_id}: {module.display_name} -> {notebook}")
 
 
-def _slides_path(
-    requested: str | None,
-    engine: ModuleType,
-    source_root: Path,
-    recording_title: str,
-) -> Path | None:
-    if not requested:
-        return _matching_slides(engine, source_root, recording_title)
-    slides_path = Path(requested).expanduser().resolve()
-    if not slides_path.is_file():
-        raise LauncherError(f"Slides file not found: {slides_path}")
-    return slides_path
+@contextmanager
+def _module_lock(module: ModuleConfig) -> Iterator[None]:
+    lock_path = module.paths.root / ".transcriber.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise LauncherError(f"Module '{module.module_id}' is already running") from error
+        yield
 
 
 def _selection(
@@ -400,7 +317,7 @@ def _selection(
     return RecordingSelection(
         engine=context.engine,
         recordings=recordings,
-        transcripts_dir=context.source_root / "Transcripts",
+        transcripts_dir=context.module.paths.transcripts,
         requested=args.lecture,
         run_all=args.all,
     )
@@ -409,59 +326,68 @@ def _selection(
 def _execute_recording(
     args: argparse.Namespace, context: LauncherContext, recording: Any
 ) -> int:
-    slides_path = _slides_path(
-        args.slides, context.engine, context.source_root, recording.title
-    )
     invocation = EngineInvocation(
         engine_path=context.engine_path,
-        subject=context.subject,
-        notebook_id=context.notebook.library_id,
-        source_root=context.source_root,
+        module=context.module,
+        notebook_id=context.notebook.notebook_uuid,
         recording=recording,
-        slides_path=slides_path,
+        slides_path=_slides_path(args.slides, context, recording.title),
     )
     command = _engine_command(invocation)
     if args.audit_only:
-        return _run_audit(command, context.source_root)
-    return _run_transcription(command, context.source_root)
+        return _run_audit(command, context.module.paths.root)
+    return _run_transcription(command, context.module.paths.root)
+
+
+def _execute_selected(
+    args: argparse.Namespace, context: LauncherContext, selected: list[Any]
+) -> int:
+    if not selected:
+        print(f"All recordings in module '{context.module.module_id}' are transcribed.")
+        return 0
+    with _module_lock(context.module):
+        for recording in selected:
+            exit_code = _execute_recording(args, context, recording)
+            if exit_code != 0:
+                return exit_code
+    return 0
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Antigravity transcription launcher")
+    parser = argparse.ArgumentParser(description="Multi-module transcription launcher")
     parser.add_argument("--workspace", default=os.getcwd())
-    parser.add_argument("--sources-root")
-    parser.add_argument("--subject")
-    parser.add_argument("--notebook-id")
+    parser.add_argument("--modules-root")
+    parser.add_argument("--module")
     parser.add_argument("--slides")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--lecture")
     target.add_argument("--all", action="store_true")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--list-modules", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
-    parser.add_argument("--register-notebook", action="store_true")
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
+        workspace = Path(args.workspace).expanduser().resolve()
+        if args.list_modules:
+            _print_modules(discover_modules(workspace, args.modules_root))
+            return 0
         context = _launcher_context(args)
-        recordings = _recordings(context.engine, context.notebook.notebook_uuid)
-        transcripts_dir = context.source_root / "Transcripts"
-        pending = _pending_recordings(context.engine, recordings, transcripts_dir)
+        recordings = _recordings(
+            context.engine, context.notebook.notebook_uuid, context.config
+        )
+        pending = _pending_recordings(
+            context.engine, recordings, context.module.paths.transcripts
+        )
         if args.list:
             _print_inventory(recordings, pending)
             return 0
         selected = _selected_recordings(_selection(args, context, recordings))
-        if not selected:
-            print("All NotebookLM recordings already have matching transcripts.")
-            return 0
-        for recording in selected:
-            exit_code = _execute_recording(args, context, recording)
-            if exit_code != 0:
-                return exit_code
-        return 0
-    except (LauncherError, OSError) as error:
+        return _execute_selected(args, context, selected)
+    except (LauncherError, ModuleConfigError, OSError) as error:
         print(f"[Launcher Error] {error}", file=sys.stderr)
         return 1
 

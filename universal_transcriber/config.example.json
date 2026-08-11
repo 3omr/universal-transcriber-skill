@@ -1,17 +1,12 @@
 {
-  "default_subject": "Toxicology",
-  "notebook_ids": {
-    "Toxicology": "NOTEBOOK_UUID"
-  },
-  "mcp_wrapper_path": "/absolute/path/to/notebooklm-mcp-server/run_mcp.py",
+  "default_subject": "General",
+  "notebook_ids": {},
+  "nlm_executable": "nlm",
+  "nlm_profile": null,
+  "modules_root": "modules",
   "transcripts_root": "Transcripts",
   "output_language": "Egyptian Arabic mixed with English medical terminology",
   "emoji_by_subject": {
-    "Toxicology": "🧪",
-    "Radiology": "🩻",
-    "Pathology": "🔬",
-    "Pharmacology": "💊",
-    "Pediatrics": "👶",
     "General": "📚"
   }
 }

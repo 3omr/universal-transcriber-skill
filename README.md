@@ -1,89 +1,99 @@
 # Universal Transcriber Skill
 
-Antigravity workspace skill for turning NotebookLM medical-course sources into
-validated five-section Markdown transcripts. The repository contains the skill,
-its launcher, and the transcription engine. It intentionally excludes lecture
-recordings, slides, exams, question banks, generated transcripts, OCR backups,
-and local credentials.
+An Antigravity workspace skill that turns any configured medical module's
+NotebookLM recordings, slides, references, question banks, and exams into
+validated five-section Markdown transcripts. One shared engine serves every
+module; course data and credentials remain local and are excluded from Git.
 
-## Included files
-
-```text
-.agents/skills/universal-transcriber/SKILL.md
-.agents/skills/universal-transcriber/scripts/run_transcription.py
-universal_transcriber/universal_transcribe.py
-universal_transcriber/config.example.json
-```
-
-## Prerequisites
+## Requirements
 
 - Python 3.10 or newer.
-- An authenticated `nlm` CLI that supports `source list <notebook-id> --json`.
-- A local PleasePrompto NotebookLM MCP wrapper that exposes
-  `list_notebooks`, `get_notebook`, `add_notebook`, `source_add`, and
-  `ask_question`.
-- `pdfinfo` and `pdftotext` for the PDF text-layer audit.
-- A course directory containing `Lecture/` plus at least one of `Questions/` or
-  `Exams/` for automatic discovery. `Transcripts/` is created when needed.
+- An authenticated `nlm` CLI (`notebooklm-mcp-cli`; tested with 0.9.8)
+  available on `PATH`.
+- NotebookLM MCP configured for Antigravity through `nlm setup`.
+- `pdfinfo` and `pdftotext` for PDF text-quality checks.
 
-## Configure
+The engine uses the supported `nlm notebook list/get/query` and `nlm source
+list/add` commands. It never creates a NotebookLM notebook.
 
-Create the local configuration, then replace the placeholders:
+## Workspace layout
 
-```bash
-cp universal_transcriber/config.example.json universal_transcriber/config.json
+```text
+.agents/skills/universal-transcriber/
+├── SKILL.md
+├── agents/openai.yaml
+├── references/modules.md
+└── scripts/
+    ├── manage_modules.py
+    ├── module_registry.py
+    └── run_transcription.py
+modules/
+└── <module-id>/
+    ├── module.json
+    ├── Lecture/
+    ├── Questions/
+    ├── Exams/
+    └── Transcripts/
+universal_transcriber/
+├── config.example.json
+└── universal_transcribe.py
 ```
 
-`config.json` is ignored by Git. Set the NotebookLM UUID for each subject and
-the absolute path to the local MCP wrapper.
+## Add a module
+
+The manager links a local module to an existing NotebookLM notebook. It is a dry
+run unless `--apply` is supplied:
+
+```bash
+python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
+  --workspace "$PWD" create --module ent --display-name ENT \
+  --notebook-title ENT
+
+python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
+  --workspace "$PWD" create --module ent --display-name ENT \
+  --notebook-title ENT --apply
+```
+
+Then put that module's files in `Lecture/`, `Questions/`, and `Exams/`. Optional
+recording-to-slide mappings live in `module.json`; see the bundled module
+reference for the full schema.
+
+If the notebook title or ID is missing or ambiguous, the manager exits with a
+`[Module Error]` before creating any directory. Check `nlm notebook list`, then
+repeat the dry run with an exact `--notebook-id`.
 
 ## Use with Antigravity
 
-Open the repository as the Antigravity workspace, add the course directories,
-and ask:
+Open this repository as the workspace and ask naturally:
 
 ```text
-اعمل تفريغ
+اعمل تفريغ لمحاضرة Volatile poison في موديول toxo
+اعمل كل تفريغات موديول ENT
 ```
 
-That phrase instructs the skill to process every pending recording. To run one
-recording, say:
-
-```text
-اعمل تفريغ لمحاضرة Plant poisons
-```
-
-The equivalent launcher commands are:
+Equivalent commands:
 
 ```bash
 python3 .agents/skills/universal-transcriber/scripts/run_transcription.py \
-  --workspace "$PWD" --all
+  --workspace "$PWD" --module toxo --lecture "Volatile poison"
 
 python3 .agents/skills/universal-transcriber/scripts/run_transcription.py \
-  --workspace "$PWD" --lecture "Plant poisons.mp3"
+  --workspace "$PWD" --module ent --all
 ```
 
-For a read-only inventory check:
+Inventory and read-only audit commands:
 
 ```bash
 python3 .agents/skills/universal-transcriber/scripts/run_transcription.py \
-  --workspace "$PWD" --list
+  --workspace "$PWD" --list-modules
+
+python3 .agents/skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module toxo --list
+
+python3 .agents/skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module toxo --lecture "Volatile poison" --audit-only
 ```
 
-If the MCP notebook library is empty, the launcher exits with a
-`[Launcher Error]`. Registering the existing NotebookLM URL requires an explicit
-approved rerun with `--register-notebook`. OCR failures also stop generation;
-the engine does not replace source documents automatically.
-
-## Output contract
-
-The engine runs and validates these sections sequentially:
-
-1. `📖 Chronological Guide`
-2. `🌟 IMP Points`
-3. `❓ MCQs`
-4. `✍️ Written Questions`
-5. `🩺 Clinical Cases`
-
-The transcript and `Transcripts/Index.md` are committed only after the complete
-document passes validation.
+Each normal run audits OCR and the live NotebookLM inventory, uploads only
+missing files, runs the five phases sequentially, validates the complete
+document, and atomically updates the module's transcript and `Index.md`.
