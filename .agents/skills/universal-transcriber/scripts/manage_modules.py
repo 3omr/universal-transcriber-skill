@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and validate module folders without creating NotebookLM notebooks."""
+"""Create, validate, and migrate agent-owned medical modules."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ class ModuleManagerError(RuntimeError):
 class NotebookSummary:
     notebook_id: str
     title: str
+    created: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class CreateRequest:
     module_id: str
     display_name: str
     aliases: tuple[str, ...]
-    notebook_id: str | None
+    notebook_ids: tuple[str, ...]
     notebook_title: str | None
     nlm_profile: str | None
     emoji: str
@@ -82,10 +83,14 @@ def _nlm_json(
 
 def _notebook_summaries(profile: str | None) -> list[NotebookSummary]:
     payload = _nlm_json(["notebook", "list"], profile)
+    if isinstance(payload, dict):
+        payload = payload.get("notebooks")
     if not isinstance(payload, list):
         raise ModuleManagerError("nlm notebook list returned an unexpected payload")
     return [
-        NotebookSummary(str(entry.get("id", "")), str(entry.get("title", "")).strip())
+        NotebookSummary(
+            str(entry.get("id", "")), str(entry.get("title") or "").strip()
+        )
         for entry in payload
         if isinstance(entry, dict) and entry.get("id")
     ]
@@ -94,11 +99,11 @@ def _notebook_summaries(profile: str | None) -> list[NotebookSummary]:
 def _matching_notebooks(
     notebooks: list[NotebookSummary], request: CreateRequest
 ) -> list[NotebookSummary]:
-    if request.notebook_id:
+    if request.notebook_ids:
         return [
             notebook
             for notebook in notebooks
-            if notebook.notebook_id == request.notebook_id
+            if notebook.notebook_id in request.notebook_ids
         ]
     title_key = normalize_module_name(request.notebook_title or request.display_name)
     return [
@@ -108,17 +113,49 @@ def _matching_notebooks(
     ]
 
 
-def _resolved_notebook(request: CreateRequest) -> NotebookSummary:
+def _create_notebook(request: CreateRequest) -> NotebookSummary:
+    title = request.notebook_title or request.display_name
+    payload = _nlm_json(["notebook", "create", title], request.nlm_profile)
+    if not isinstance(payload, dict):
+        raise ModuleManagerError("nlm notebook create returned an unexpected payload")
+    notebook_id = str(payload.get("id") or payload.get("notebook_id") or "").strip()
+    if not notebook_id:
+        raise ModuleManagerError("nlm notebook create returned no notebook ID")
+    return NotebookSummary(
+        notebook_id,
+        str(payload.get("title") or title).strip(),
+        created=True,
+    )
+
+
+def _resolved_notebooks(request: CreateRequest) -> list[NotebookSummary]:
     matches = _matching_notebooks(_notebook_summaries(request.nlm_profile), request)
-    if len(matches) != 1:
-        reference = request.notebook_id or request.notebook_title or request.display_name
-        raise ModuleManagerError(f"Notebook '{reference}' did not resolve uniquely")
+    if request.notebook_ids:
+        if len(matches) != len(request.notebook_ids):
+            missing = sorted(set(request.notebook_ids) - {match.notebook_id for match in matches})
+            raise ModuleManagerError("Notebook IDs were not found: " + ", ".join(missing))
+        matches_by_id = {match.notebook_id: match for match in matches}
+        return [matches_by_id[notebook_id] for notebook_id in request.notebook_ids]
+    if len(matches) > 1:
+        options = ", ".join(f"{match.title} ({match.notebook_id})" for match in matches)
+        raise ModuleManagerError(
+            "Multiple matching notebooks found; choose one or more with "
+            f"--notebook-id: {options}"
+        )
+    if not matches:
+        if not request.apply:
+            return [
+                NotebookSummary(
+                    "<created-on-apply>", request.notebook_title or request.display_name
+                )
+            ]
+        return [_create_notebook(request)]
     notebook = matches[0]
     if request.notebook_title and normalize_module_name(
         request.notebook_title
     ) != normalize_module_name(notebook.title):
         raise ModuleManagerError("Notebook ID and title refer to different notebooks")
-    return notebook
+    return [notebook]
 
 
 def _existing_aliases(workspace: Path, requested_root: str | None) -> set[str]:
@@ -149,17 +186,19 @@ def _validated_request(request: CreateRequest) -> None:
         raise ModuleManagerError(f"Module aliases already exist: {', '.join(duplicates)}")
 
 
-def _module_payload(request: CreateRequest, notebook: NotebookSummary) -> dict[str, Any]:
+def _module_payload(
+    request: CreateRequest, notebooks: list[NotebookSummary]
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "module_id": request.module_id,
         "display_name": request.display_name,
         "aliases": list(request.aliases),
-        "notebook": {
-            "id": notebook.notebook_id,
-            "title": notebook.title,
-            "profile": request.nlm_profile,
-        },
+        "notebooks": [
+            {"id": notebook.notebook_id, "title": notebook.title}
+            for notebook in notebooks
+        ],
+        "notebook_profile": request.nlm_profile,
         "output": {
             "emoji": request.emoji,
             "language": "Egyptian Arabic mixed with English medical terminology",
@@ -185,19 +224,32 @@ def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
 
 def _create_module(request: CreateRequest) -> int:
     _validated_request(request)
-    notebook = _resolved_notebook(request)
     module_root = modules_root(request.workspace, request.modules_root) / request.module_id
     if module_root.exists():
         raise ModuleManagerError(f"Module directory already exists: {module_root}")
+    notebooks = _resolved_notebooks(request)
     print(f"Module: {request.module_id} ({request.display_name})")
-    print(f"Notebook: {notebook.title} ({notebook.notebook_id})")
+    print(
+        "Notebooks: "
+        + ", ".join(f"{notebook.title} ({notebook.notebook_id})" for notebook in notebooks)
+    )
+    created_notebook_titles = [
+        notebook.title for notebook in notebooks if notebook.created
+    ]
+    if created_notebook_titles:
+        print(
+            "Created NotebookLM project(s): "
+            + ", ".join(created_notebook_titles)
+        )
     print(f"Destination: {module_root}")
     if not request.apply:
         print("Dry run only. Re-run with --apply to create the module.")
         return 0
-    for directory_name in ("Lecture", "Questions", "Exams"):
+    for directory_name in ("Lecture", "Questions", "Transcripts"):
         (module_root / directory_name).mkdir(parents=True, exist_ok=True)
-    _write_json_atomically(module_root / "module.json", _module_payload(request, notebook))
+    _write_json_atomically(
+        module_root / "module.json", _module_payload(request, notebooks)
+    )
     print(f"Created module: {module_root}")
     return 0
 
@@ -207,12 +259,18 @@ def _validate_module(args: argparse.Namespace) -> int:
     module = resolve_module(
         discover_modules(workspace, args.modules_root), args.module
     )
-    payload = _nlm_json(
-        ["notebook", "get", module.notebook.notebook_id], module.notebook.profile
-    )
-    resolved_id = str(payload.get("notebook_id", "")) if isinstance(payload, dict) else ""
-    if resolved_id != module.notebook.notebook_id:
-        raise ModuleManagerError("Configured notebook could not be verified")
+    for notebook in module.notebook.notebooks:
+        reference = notebook.notebook_id or notebook.title
+        payload = _nlm_json(["notebook", "get", reference], module.notebook.profile)
+        resolved_id = (
+            str(payload.get("notebook_id") or payload.get("id") or "")
+            if isinstance(payload, dict)
+            else ""
+        )
+        if notebook.notebook_id and resolved_id != notebook.notebook_id:
+            raise ModuleManagerError(
+                f"Configured notebook could not be verified: {reference}"
+            )
     print(f"Valid module: {module.module_id} -> {module.notebook.title}")
     return 0
 
@@ -220,7 +278,36 @@ def _validate_module(args: argparse.Namespace) -> int:
 def _list_modules(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     for module in discover_modules(workspace, args.modules_root):
-        print(f"{module.module_id}\t{module.display_name}\t{module.notebook.title}")
+        titles = ", ".join(reference.title for reference in module.notebook.notebooks)
+        print(f"{module.module_id}\t{module.display_name}\t{titles}")
+    return 0
+
+
+def _merge_legacy_exams(args: argparse.Namespace) -> int:
+    workspace = Path(args.workspace).expanduser().resolve()
+    module = resolve_module(discover_modules(workspace, args.modules_root), args.module)
+    legacy = module.paths.legacy_exams
+    questions = module.paths.questions
+    if not legacy.is_dir():
+        print(f"No legacy Exams directory found for {module.module_id}.")
+        return 0
+    questions.mkdir(parents=True, exist_ok=True)
+    conflicts: list[str] = []
+    for source in sorted(path for path in legacy.rglob("*") if path.is_file()):
+        destination = questions / source.relative_to(legacy)
+        if destination.exists():
+            conflicts.append(str(destination.relative_to(module.paths.root)))
+    if conflicts:
+        raise ModuleManagerError(
+            "Cannot merge Exams; destination conflicts: " + ", ".join(conflicts)
+        )
+    moved = 0
+    for source in sorted(path for path in legacy.rglob("*") if path.is_file()):
+        destination = questions / source.relative_to(legacy)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+        moved += 1
+    print(f"Moved {moved} file(s) from Exams/ to Questions/ for {module.module_id}.")
     return 0
 
 
@@ -231,7 +318,7 @@ def _create_request(args: argparse.Namespace) -> CreateRequest:
         module_id=args.module,
         display_name=args.display_name,
         aliases=tuple(args.alias or ()),
-        notebook_id=args.notebook_id,
+        notebook_ids=tuple(args.notebook_id or ()),
         notebook_title=args.notebook_title,
         nlm_profile=args.nlm_profile,
         emoji=args.emoji,
@@ -248,7 +335,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--module", required=True)
     create.add_argument("--display-name", required=True)
     create.add_argument("--alias", action="append")
-    create.add_argument("--notebook-id")
+    create.add_argument("--notebook-id", action="append")
     create.add_argument("--notebook-title")
     create.add_argument("--nlm-profile")
     create.add_argument("--emoji", default="📚")
@@ -256,6 +343,8 @@ def _parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate")
     validate.add_argument("--module", required=True)
     commands.add_parser("list")
+    migrate = commands.add_parser("merge-exams")
+    migrate.add_argument("--module", required=True)
     return parser
 
 
@@ -266,6 +355,8 @@ def main() -> int:
             return _create_module(_create_request(args))
         if args.command == "validate":
             return _validate_module(args)
+        if args.command == "merge-exams":
+            return _merge_legacy_exams(args)
         return _list_modules(args)
     except (ModuleConfigError, ModuleManagerError, OSError) as error:
         print(f"[Module Error] {error}", file=sys.stderr)

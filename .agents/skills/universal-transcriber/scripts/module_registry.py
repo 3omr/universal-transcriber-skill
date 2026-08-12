@@ -19,10 +19,27 @@ class ModuleConfigError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class NotebookConfig:
+class NotebookReference:
     notebook_id: str
     title: str
+
+
+@dataclass(frozen=True)
+class NotebookConfig:
+    notebooks: tuple[NotebookReference, ...]
     profile: str | None
+
+    @property
+    def notebook_id(self) -> str:
+        return self.notebooks[0].notebook_id
+
+    @property
+    def title(self) -> str:
+        return self.notebooks[0].title
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        return tuple(reference.notebook_id for reference in self.notebooks)
 
 
 @dataclass(frozen=True)
@@ -30,8 +47,13 @@ class ModulePaths:
     root: Path
     lecture: Path
     questions: Path
-    exams: Path
+    legacy_exams: Path
     transcripts: Path
+
+    @property
+    def exams(self) -> Path:
+        """Backward-compatible name for the temporary legacy input folder."""
+        return self.legacy_exams
 
 
 @dataclass(frozen=True)
@@ -71,16 +93,29 @@ def _required_text(payload: dict[str, Any], key: str, source: Path) -> str:
 
 
 def _notebook_config(payload: dict[str, Any], source: Path) -> NotebookConfig:
-    notebook_payload = payload.get("notebook", {})
-    if not isinstance(notebook_payload, dict):
-        raise ModuleConfigError(f"{source}: 'notebook' must be an object")
-    notebook_id = str(notebook_payload.get("id", "")).strip()
-    title = str(notebook_payload.get("title", "")).strip()
-    if not notebook_id and not title:
-        raise ModuleConfigError(f"{source}: notebook id or title is required")
-    raw_profile = notebook_payload.get("profile")
+    raw_notebooks = payload.get("notebooks")
+    if raw_notebooks is None:
+        raw_notebooks = [payload.get("notebook", {})]
+    if not isinstance(raw_notebooks, list) or not raw_notebooks:
+        raise ModuleConfigError(f"{source}: 'notebooks' must be a non-empty list")
+    notebooks: list[NotebookReference] = []
+    for notebook_payload in raw_notebooks:
+        if not isinstance(notebook_payload, dict):
+            raise ModuleConfigError(f"{source}: each notebook must be an object")
+        notebook_id = str(notebook_payload.get("id", "")).strip()
+        title = str(notebook_payload.get("title", "")).strip()
+        if not notebook_id and not title:
+            raise ModuleConfigError(f"{source}: notebook id or title is required")
+        notebooks.append(NotebookReference(notebook_id, title))
+    if len({reference.notebook_id for reference in notebooks if reference.notebook_id}) != len(
+        [reference.notebook_id for reference in notebooks if reference.notebook_id]
+    ):
+        raise ModuleConfigError(f"{source}: notebook IDs must be unique")
+    raw_profile = payload.get("notebook_profile")
+    if raw_profile is None and isinstance(payload.get("notebook"), dict):
+        raw_profile = payload["notebook"].get("profile")
     profile = str(raw_profile).strip() if raw_profile else None
-    return NotebookConfig(notebook_id, title, profile)
+    return NotebookConfig(tuple(notebooks), profile)
 
 
 def _aliases(payload: dict[str, Any], module_id: str, display_name: str) -> tuple[str, ...]:
@@ -121,7 +156,7 @@ def _module_paths(module_root: Path) -> ModulePaths:
         root=module_root,
         lecture=module_root / "Lecture",
         questions=module_root / "Questions",
-        exams=module_root / "Exams",
+        legacy_exams=module_root / "Exams",
         transcripts=module_root / "Transcripts",
     )
 
@@ -153,8 +188,15 @@ def _module_config(
         raise ModuleConfigError(f"{config_path}: schema_version must be 1")
     emoji, language = _output_settings(payload)
     paths = _module_paths(module_root)
-    if not paths.lecture.is_dir():
-        raise ModuleConfigError(f"Missing Lecture directory: {paths.lecture}")
+    for directory_name, directory_path in (
+        ("Lecture", paths.lecture),
+        ("Questions", paths.questions),
+        ("Transcripts", paths.transcripts),
+    ):
+        if not directory_path.is_dir():
+            raise ModuleConfigError(
+                f"Missing {directory_name} directory: {directory_path}"
+            )
     return ModuleConfig(
         module_id=module_id,
         display_name=display_name,
