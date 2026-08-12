@@ -12,6 +12,7 @@
 !.agents/skills/universal-transcriber/agents/openai.yaml
 !.agents/skills/universal-transcriber/references/
 !.agents/skills/universal-transcriber/references/modules.md
+!.agents/skills/universal-transcriber/references/exam-style.md
 !.agents/skills/universal-transcriber/scripts/
 !.agents/skills/universal-transcriber/scripts/run_transcription.py
 !.agents/skills/universal-transcriber/scripts/manage_modules.py

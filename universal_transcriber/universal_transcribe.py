@@ -119,6 +119,7 @@ class RemoteSource:
     normalized_name: str
     normalized_stem: str
     source_type: str = ""
+    notebook_uuid: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,15 +142,18 @@ class Phase0Report:
     notebook: NotebookTarget
     local_sources: list[LocalSource]
     remote_sources: list[RemoteSource]
+    notebooks: tuple[NotebookTarget, ...] = ()
     duplicates: list[LocalSource] = field(default_factory=list)
     ambiguous: list[LocalSource] = field(default_factory=list)
     missing_before_upload: list[LocalSource] = field(default_factory=list)
     unsupported: list[LocalSource] = field(default_factory=list)
+    ignored: list[LocalSource] = field(default_factory=list)
     uploaded: list[LocalSource] = field(default_factory=list)
     year_map: dict[int, list[str]] = field(default_factory=dict)
     question_banks: list[str] = field(default_factory=list)
     question_bank_links: dict[str, list[str]] = field(default_factory=dict)
     recording_source: str = ""
+    recording_sources: tuple[str, ...] = ()
     slide_source: str = ""
     blocking_errors: list[str] = field(default_factory=list)
 
@@ -157,18 +161,25 @@ class Phase0Report:
 @dataclass(frozen=True)
 class Phase0Request:
     config: dict[str, Any]
-    requested_notebook_id: str
+    requested_notebook_ids: tuple[str, ...]
     subject: str
     sources_root: str
     lecture_name: str
-    recording_source: str | None
+    recording_sources: tuple[str, ...]
     slides_path: str | None
+    approved_uploads: tuple[str, ...] = ()
+    agent_reviewed: bool = False
+    assessment_sources: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def requested_notebook_id(self) -> str:
+        return self.requested_notebook_ids[0]
 
 
 @dataclass(frozen=True)
 class SourceAuthorityRequest:
     lecture_name: str
-    recording_source: str | None
+    recording_sources: tuple[str, ...]
     slides_path: str | None
 
 
@@ -181,6 +192,8 @@ class PhaseQuery:
     validator: Callable[[QueryResult], list[str]]
     source_ids: tuple[str, ...] = ()
     source_names: tuple[str, ...] = ()
+    notebook_ids: tuple[str, ...] = ()
+    project_scopes: tuple["ProjectQueryScope", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,12 +203,23 @@ class NlmQueryRequest:
     query_text: str
     source_ids: tuple[str, ...]
     source_names: tuple[str, ...]
+    notebook_ids: tuple[str, ...] = ()
+    phase_name: str = ""
+    project_scopes: tuple["ProjectQueryScope", ...] = ()
+
+
+@dataclass(frozen=True)
+class ProjectQueryScope:
+    notebook_uuid: str
+    source_ids: tuple[str, ...]
+    source_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class QueryScope:
     source_ids: tuple[str, ...]
     source_names: tuple[str, ...]
+    project_scopes: tuple[ProjectQueryScope, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,15 +249,25 @@ class OutputTarget:
 @dataclass(frozen=True)
 class RunRequest:
     subject: str
-    notebook_id: str
+    notebook_ids: tuple[str, ...]
     lecture_name: str
-    recording_source: str | None
+    recording_sources: tuple[str, ...]
     slides_path: str | None
     sources_root: str
     title: str
     emoji: str
     target: OutputTarget
     audit_only: bool
+    approved_uploads: tuple[str, ...] = ()
+    agent_reviewed: bool = False
+    exam_style_profile: dict[str, Any] = field(default_factory=dict)
+    assessment_sources: tuple[dict[str, Any], ...] = ()
+    draft_only: bool = False
+    finalize_draft: bool = False
+
+    @property
+    def notebook_id(self) -> str:
+        return self.notebook_ids[0]
 
 
 @dataclass(frozen=True)
@@ -247,19 +281,27 @@ class PipelineContext:
     evidence_sources: list[str]
     guide_scope: QueryScope
     assessment_scope: QueryScope
+    exam_style_profile: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class CaseEvidence:
     year_map: dict[int, list[str]]
     evidence_sources: list[str]
-    recording_source: str
+    recording_sources: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class UploadOutcome:
     remote_sources: list[RemoteSource]
     uploaded_by_run: bool
+
+
+def _configure_line_buffering() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(line_buffering=True)
 
 
 def load_config() -> dict[str, Any]:
@@ -347,6 +389,8 @@ def _run_nlm_json(
 
 
 def _notebook_entries(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        payload = payload.get("notebooks")
     if not isinstance(payload, list):
         raise Phase0Error("nlm notebook list returned an unexpected payload")
     entries = [entry for entry in payload if isinstance(entry, dict) and entry.get("id")]
@@ -417,6 +461,19 @@ def resolve_notebook(
         config, ["notebook", "get", notebook_id], 60, "nlm notebook get"
     )
     return _notebook_target(payload, subject)
+
+
+def resolve_notebooks(
+    config: dict[str, Any], requested_ids: tuple[str, ...], subject: str
+) -> tuple[NotebookTarget, ...]:
+    if not requested_ids:
+        raise Phase0Error("At least one NotebookLM project is required")
+    resolved: list[NotebookTarget] = []
+    for requested_id in requested_ids:
+        notebook = resolve_notebook(config, requested_id, subject)
+        if notebook.notebook_uuid not in {item.notebook_uuid for item in resolved}:
+            resolved.append(notebook)
+    return tuple(resolved)
 
 
 def _dictionary_entries(payload: list[Any]) -> list[dict[str, Any]]:
@@ -494,6 +551,7 @@ def list_remote_sources(
                 source_type=str(
                     source_entry.get("type") or source_entry.get("source_type") or ""
                 ),
+                notebook_uuid=notebook_uuid,
             )
         )
     return remote_sources
@@ -515,6 +573,12 @@ def normalize_source_stem(source_name: str) -> str:
     return _normalized_source_text(os.path.splitext(source_name or "")[0])
 
 
+def normalize_relative_source_path(source_path: str) -> str:
+    normalized = unicodedata.normalize("NFKC", source_path or "")
+    normalized = normalized.replace("\\", "/").casefold().strip(" ./")
+    return re.sub(r"/+", "/", normalized)
+
+
 def extract_exam_years(source_text: str) -> tuple[int, ...]:
     normalized = unicodedata.normalize("NFKC", source_text or "").translate(ARABIC_DIGITS)
     years = {int(year) for year in re.findall(r"(?<!\d)(202[1-4])(?!\d)", normalized)}
@@ -526,7 +590,7 @@ def extract_filename_exam_years(file_name: str) -> tuple[int, ...]:
     years = set(extract_exam_years(normalized))
     for short_year in re.findall(r"(?<!\d)(2[1-4])(?!\d)", normalized):
         years.add(2000 + int(short_year))
-    return tuple(sorted(years))
+    return tuple(sorted(year for year in years if year in EXAM_YEARS))
 
 
 def _classify_source(path: str, root_name: str) -> str:
@@ -545,6 +609,42 @@ def _classify_source(path: str, root_name: str) -> str:
     return "lecture_material"
 
 
+def _assessment_source_map(
+    assessment_sources: tuple[dict[str, Any], ...]
+) -> dict[str, tuple[str, tuple[int, ...]]]:
+    classifications: dict[str, tuple[str, tuple[int, ...]]] = {}
+    for entry in assessment_sources:
+        relative_path = str(entry.get("path", "")).strip()
+        source_type = str(entry.get("type", "")).strip()
+        if not relative_path or source_type not in {
+            "past_exam",
+            "question_bank",
+            "ignore",
+        }:
+            raise Phase0Error(
+                "assessment_sources entries require path and type "
+                "(past_exam, question_bank, or ignore)"
+            )
+        normalized_path = os.path.normpath(relative_path.replace("\\", os.sep))
+        if normalized_path.startswith("..") or not (
+            normalized_path == "Questions" or normalized_path.startswith("Questions" + os.sep)
+        ):
+            raise Phase0Error("assessment source paths must stay under Questions/")
+        years = extract_exam_years(str(entry.get("year", "")))
+        if source_type == "past_exam" and not years:
+            raise Phase0Error(
+                f"Past exam assessment source needs an explicit verified year: {relative_path}"
+            )
+        normalized_key = normalize_relative_source_path(normalized_path)
+        if normalized_key in classifications:
+            raise Phase0Error(f"Assessment source is classified more than once: {relative_path}")
+        classifications[normalized_key] = (
+            source_type,
+            years,
+        )
+    return classifications
+
+
 def _local_source(path: str, sources_root: str, root_name: str) -> LocalSource:
     file_name = os.path.basename(path)
     return LocalSource(
@@ -560,7 +660,11 @@ def _local_source(path: str, sources_root: str, root_name: str) -> LocalSource:
     )
 
 
-def scan_local_sources(sources_root: str) -> list[LocalSource]:
+def scan_local_sources(
+    sources_root: str,
+    assessment_sources: tuple[dict[str, Any], ...] = (),
+    require_assessment_manifest: bool = False,
+) -> list[LocalSource]:
     local_sources: list[LocalSource] = []
     for root_name in ("Lecture", "Questions", "Exams"):
         directory = os.path.join(sources_root, root_name)
@@ -575,6 +679,53 @@ def scan_local_sources(sources_root: str) -> list[LocalSource]:
                     continue
                 path = os.path.abspath(os.path.join(current_root, file_name))
                 local_sources.append(_local_source(path, sources_root, root_name))
+    question_sources = [
+        source
+        for source in local_sources
+        if normalize_relative_source_path(source.relative_path).startswith("questions/")
+    ]
+    legacy_exam_sources = [
+        source
+        for source in local_sources
+        if normalize_relative_source_path(source.relative_path).startswith("exams/")
+    ]
+    if require_assessment_manifest and legacy_exam_sources:
+        raise Phase0Error("Migrate legacy Exams/ into Questions/ before a real run")
+    if require_assessment_manifest and question_sources and not assessment_sources:
+        raise Phase0Error(
+            "Agent assessment manifest must classify every file under Questions/"
+        )
+    classifications = _assessment_source_map(assessment_sources)
+    local_paths = {
+        normalize_relative_source_path(source.relative_path)
+        for source in local_sources
+    }
+    missing_manifest_paths = sorted(set(classifications) - local_paths)
+    if missing_manifest_paths:
+        raise Phase0Error(
+            "Assessment manifest references missing local source(s): "
+            + ", ".join(missing_manifest_paths)
+        )
+    classified_question_paths = {
+        path for path in classifications if path.startswith("questions/")
+    }
+    unclassified_question_paths = sorted(
+        normalize_relative_source_path(source.relative_path)
+        for source in question_sources
+        if normalize_relative_source_path(source.relative_path)
+        not in classified_question_paths
+    )
+    if unclassified_question_paths:
+        raise Phase0Error(
+            "Assessment manifest does not classify: "
+            + ", ".join(unclassified_question_paths)
+        )
+    for source in local_sources:
+        classification = classifications.get(
+            normalize_relative_source_path(source.relative_path)
+        )
+        if classification:
+            source.role, source.years = classification
     return local_sources
 
 
@@ -780,6 +931,8 @@ def build_deduplication_plan(
     ambiguous: list[LocalSource] = []
     missing: list[LocalSource] = []
     for local in local_sources:
+        if local.role == "ignore":
+            continue
         exact = remote_by_name.get(local.normalized_name, [])
         stem_matches = [
             remote
@@ -890,6 +1043,19 @@ def _upload_source_with_retries(
     raise Phase0Error(
         f"Failed to upload '{source.relative_path}' after three attempts: {last_error}"
     )
+
+
+def _replace_project_inventory(
+    remote_sources: list[RemoteSource],
+    notebook_uuid: str,
+    refreshed_sources: list[RemoteSource],
+) -> list[RemoteSource]:
+    retained = [
+        source
+        for source in remote_sources
+        if source.notebook_uuid not in {"", notebook_uuid}
+    ]
+    return retained + refreshed_sources
 
 
 def upload_missing_sources(
@@ -1016,21 +1182,25 @@ def _audit_source_match(
     )
 
 
-def _authority_requests(authority: SourceAuthorityRequest) -> tuple[str, str | None]:
-    recording_request = authority.recording_source or authority.lecture_name
+def _authority_requests(
+    authority: SourceAuthorityRequest,
+) -> tuple[tuple[str, ...], str | None]:
+    recording_requests = authority.recording_sources or (authority.lecture_name,)
     slide_request = (
         os.path.basename(authority.slides_path) if authority.slides_path else None
     )
-    return recording_request, slide_request
+    return recording_requests, slide_request
 
 
 def resolve_remote_source_authority(
     report: Phase0Report, authority: SourceAuthorityRequest
 ) -> None:
-    recording_request, slide_request = _authority_requests(authority)
-    report.recording_source = _remote_source_match(
-        recording_request, report, "recording"
+    recording_requests, slide_request = _authority_requests(authority)
+    report.recording_sources = tuple(
+        _remote_source_match(recording_request, report, "recording")
+        for recording_request in recording_requests
     )
+    report.recording_source = " + ".join(report.recording_sources)
     if slide_request:
         report.slide_source = _remote_source_match(slide_request, report, None)
 
@@ -1038,10 +1208,12 @@ def resolve_remote_source_authority(
 def resolve_audit_source_authority(
     report: Phase0Report, authority: SourceAuthorityRequest
 ) -> None:
-    recording_request, slide_request = _authority_requests(authority)
-    report.recording_source = _audit_source_match(
-        recording_request, report, "recording"
+    recording_requests, slide_request = _authority_requests(authority)
+    report.recording_sources = tuple(
+        _audit_source_match(recording_request, report, "recording")
+        for recording_request in recording_requests
     )
+    report.recording_source = " + ".join(report.recording_sources)
     if slide_request:
         report.slide_source = _audit_source_match(slide_request, report, None)
 
@@ -1070,7 +1242,13 @@ def _print_source_authority(report: Phase0Report) -> None:
 
 def print_phase0_report(report: Phase0Report) -> None:
     print("\n=== Phase 0: Workspace & NotebookLM Audit ===")
-    print(f"Notebook: {report.notebook.name} ({report.notebook.notebook_uuid})")
+    print(
+        "Notebook projects: "
+        + ", ".join(
+            f"{notebook.name} ({notebook.notebook_uuid})"
+            for notebook in (report.notebooks or (report.notebook,))
+        )
+    )
     print(f"Local sources: {len(report.local_sources)}")
     print(f"Remote sources: {len(report.remote_sources)}")
     print(f"Already uploaded: {len(report.duplicates)}")
@@ -1078,6 +1256,7 @@ def print_phase0_report(report: Phase0Report) -> None:
     print(f"Missing before upload: {len(report.missing_before_upload)}")
     print(f"Uploaded now: {len(report.uploaded)}")
     print(f"Unsupported (not uploaded): {len(report.unsupported)}")
+    print(f"Agent-ignored: {len(report.ignored)}")
     if report.year_map:
         year_summary = ", ".join(
             f"{year}: {len(names)} source(s)" for year, names in report.year_map.items()
@@ -1096,24 +1275,27 @@ def print_phase0_audit_report(report: Phase0Report) -> None:
 
 
 def _new_phase0_report(
-    notebook: NotebookTarget,
+    notebooks: tuple[NotebookTarget, ...],
     local_sources: list[LocalSource],
     remote_sources: list[RemoteSource],
     deduplication: tuple[list[LocalSource], list[LocalSource], list[LocalSource]],
 ) -> Phase0Report:
     duplicates, ambiguous, missing = deduplication
     return Phase0Report(
-        notebook=notebook,
+        notebook=notebooks[0],
         local_sources=local_sources,
         remote_sources=remote_sources,
+        notebooks=notebooks,
         duplicates=duplicates,
         ambiguous=ambiguous,
         missing_before_upload=missing,
         unsupported=[
             source
             for source in local_sources
-            if source.extension not in NLM_UPLOAD_EXTENSIONS
+            if source.role == "ignore"
+            or source.extension not in NLM_UPLOAD_EXTENSIONS
         ],
+        ignored=[source for source in local_sources if source.role == "ignore"],
         year_map=build_exam_year_map(local_sources),
         question_banks=sorted(
             source.name for source in local_sources if source.role == "question_bank"
@@ -1123,19 +1305,25 @@ def _new_phase0_report(
 
 
 def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
-    notebook = resolve_notebook(
-        request.config, request.requested_notebook_id, request.subject
+    notebooks = resolve_notebooks(
+        request.config, request.requested_notebook_ids, request.subject
     )
-    remote_sources = list_remote_sources(notebook.notebook_uuid, request.config)
-    local_sources = scan_local_sources(request.sources_root)
+    remote_sources: list[RemoteSource] = []
+    for notebook in notebooks:
+        remote_sources.extend(list_remote_sources(notebook.notebook_uuid, request.config))
+    local_sources = scan_local_sources(
+        request.sources_root,
+        request.assessment_sources,
+        require_assessment_manifest=request.agent_reviewed,
+    )
     if not local_sources:
         raise Phase0Error(
             f"No source files were found under {request.sources_root}/Lecture, "
-            "Questions, or Exams"
+            "Questions"
         )
     verify_document_text(local_sources)
     return _new_phase0_report(
-        notebook,
+        notebooks,
         local_sources,
         remote_sources,
         build_deduplication_plan(local_sources, remote_sources),
@@ -1153,6 +1341,42 @@ def _append_ocr_failures(report: Phase0Report) -> None:
                 )
 
 
+def _ambiguous_source_is_in_request(
+    source: LocalSource, request: Phase0Request
+) -> bool:
+    """Only block ambiguity that can enter this lecture's evidence scope.
+
+    The workspace inventory is intentionally broader than one lecture.  An
+    unrelated local slide may have several remote matches (for example, older
+    copies of another lecture), but that should not prevent a run whose
+    authority and assessment manifest do not select it.  Assessment files are
+    always in scope once the Agent classifies them, while lecture recordings
+    and slides are relevant only when they match the requested authority.
+    """
+    if source.role in {"past_exam", "question_bank"}:
+        return True
+    requested_names = {
+        normalize_source_key(name)
+        for name in (request.recording_sources or (request.lecture_name,))
+    }
+    if request.slides_path:
+        requested_names.add(normalize_source_key(os.path.basename(request.slides_path)))
+    return source.normalized_name in requested_names or source.normalized_stem in {
+        normalize_source_stem(name) for name in requested_names
+    }
+
+
+def _append_ambiguous_matches(
+    request: Phase0Request, report: Phase0Report
+) -> None:
+    for source in report.ambiguous:
+        if _ambiguous_source_is_in_request(source, request):
+            report.blocking_errors.append(
+                "Ambiguous NotebookLM match requires Agent decision for the "
+                f"selected scope: {source.relative_path}"
+            )
+
+
 def _refresh_evidence_metadata(report: Phase0Report) -> None:
     remotely_available = [
         source
@@ -1166,14 +1390,59 @@ def _refresh_evidence_metadata(report: Phase0Report) -> None:
     report.question_bank_links = link_exam_sources_to_question_banks(remotely_available)
 
 
+def _approved_upload_candidates(
+    approved_names: tuple[str, ...],
+    upload_candidates: list[LocalSource],
+) -> list[LocalSource]:
+    by_path: dict[str, list[LocalSource]] = {}
+    by_name: dict[str, list[LocalSource]] = {}
+    for source in upload_candidates:
+        by_path.setdefault(
+            normalize_relative_source_path(source.relative_path), []
+        ).append(source)
+        by_name.setdefault(source.normalized_name, []).append(source)
+    selected: list[LocalSource] = []
+    seen_approved: set[str] = set()
+    for approved_name in approved_names:
+        raw_name = approved_name.replace("\\", "/").strip()
+        if raw_name.startswith("/") or raw_name == ".." or raw_name.startswith("../") or "/../" in raw_name:
+            raise Phase0Error(f"Approved upload escapes the module: {approved_name}")
+        normalized_name = normalize_relative_source_path(raw_name)
+        if normalized_name in seen_approved:
+            raise Phase0Error(f"Approved upload is listed more than once: {approved_name}")
+        seen_approved.add(normalized_name)
+        matches = (
+            by_path.get(normalized_name, [])
+            if "/" in normalized_name
+            else by_name.get(normalize_source_key(approved_name), [])
+        )
+        if len(matches) != 1:
+            raise Phase0Error(
+                f"Approved upload must match exactly one missing local source: {approved_name}"
+            )
+        selected.append(matches[0])
+    return selected
+
+
 def _upload_phase0_sources(request: Phase0Request, report: Phase0Report) -> None:
     upload_candidates = [
         source
         for source in report.missing_before_upload
         if source not in report.unsupported
     ]
-    report.uploaded, report.remote_sources = upload_missing_sources(
+    if request.agent_reviewed:
+        upload_candidates = _approved_upload_candidates(
+            request.approved_uploads,
+            upload_candidates,
+        )
+    uploaded, refreshed_primary_sources = upload_missing_sources(
         request.config, report.notebook, upload_candidates, report.remote_sources
+    )
+    report.uploaded = uploaded
+    report.remote_sources = _replace_project_inventory(
+        report.remote_sources,
+        report.notebook.notebook_uuid,
+        refreshed_primary_sources,
     )
     _refresh_evidence_metadata(report)
 
@@ -1181,7 +1450,7 @@ def _upload_phase0_sources(request: Phase0Request, report: Phase0Report) -> None
 def _authority_request(request: Phase0Request) -> SourceAuthorityRequest:
     return SourceAuthorityRequest(
         lecture_name=request.lecture_name,
-        recording_source=request.recording_source,
+        recording_sources=request.recording_sources,
         slides_path=request.slides_path,
     )
 
@@ -1203,6 +1472,7 @@ def _resolve_audit_authority(request: Phase0Request, report: Phase0Report) -> No
 def run_phase0_sync(request: Phase0Request) -> Phase0Report:
     report = _initial_phase0_report(request)
     _append_ocr_failures(report)
+    _append_ambiguous_matches(request, report)
     if not report.blocking_errors:
         _upload_phase0_sources(request, report)
     _resolve_remote_authority(request, report)
@@ -1215,6 +1485,7 @@ def run_phase0_sync(request: Phase0Request) -> Phase0Report:
 def run_phase0_audit(request: Phase0Request) -> Phase0Report:
     report = _initial_phase0_report(request)
     _append_ocr_failures(report)
+    _append_ambiguous_matches(request, report)
     _resolve_audit_authority(request, report)
     print_phase0_audit_report(report)
     return report
@@ -1237,27 +1508,30 @@ def _reference_names(payload: Any) -> list[str]:
     return names
 
 
-def _nlm_query_arguments(request: NlmQueryRequest) -> list[str]:
+def _nlm_query_arguments(
+    request: NlmQueryRequest,
+    notebook_id: str | None = None,
+    include_source_ids: bool = True,
+    source_ids: tuple[str, ...] | None = None,
+) -> list[str]:
+    target_notebook = notebook_id or request.notebook.notebook_uuid
     arguments = [
         "notebook",
         "query",
-        request.notebook.notebook_uuid,
+        target_notebook,
         request.query_text,
         "--timeout",
         "180",
     ]
-    if request.source_ids:
-        arguments.extend(["--source-ids", ",".join(request.source_ids)])
+    selected_source_ids = request.source_ids if source_ids is None else source_ids
+    if include_source_ids and selected_source_ids:
+        arguments.extend(["--source-ids", ",".join(selected_source_ids)])
     return arguments
 
 
-def _run_nlm_cli_query(request: NlmQueryRequest) -> QueryResult:
-    payload = _run_nlm_json(
-        request.config,
-        _nlm_query_arguments(request),
-        NLM_QUERY_TIMEOUT_SECONDS,
-        "nlm notebook query",
-    )
+def _query_result_from_payload(
+    payload: Any, request: NlmQueryRequest
+) -> QueryResult:
     if not isinstance(payload, dict):
         raise NlmError("nlm notebook query returned an unexpected payload")
     names = list(request.source_names)
@@ -1266,7 +1540,7 @@ def _run_nlm_cli_query(request: NlmQueryRequest) -> QueryResult:
             if name not in names:
                 names.append(name)
     return QueryResult(
-        answer=str(payload.get("answer", "")).strip(),
+        answer=str(payload.get("answer") or payload.get("response") or "").strip(),
         source_names=tuple(names),
         session_id=(
             str(payload.get("conversation_id"))
@@ -1274,6 +1548,147 @@ def _run_nlm_cli_query(request: NlmQueryRequest) -> QueryResult:
             else None
         ),
     )
+
+
+def _merge_imp_answers(answers: list[str]) -> str:
+    sections: dict[str, list[str]] = {heading: [] for heading in IMP_HEADINGS}
+    for answer in answers:
+        for index, heading in enumerate(IMP_HEADINGS):
+            next_headings = IMP_HEADINGS[index + 1 :]
+            boundary = "|".join(re.escape(item) for item in next_headings)
+            pattern = rf"(?ms)^{re.escape(heading)}\s*\n?(.*?)(?=^(?:{boundary})\s*$|\Z)"
+            match = re.search(pattern, answer)
+            if match and match.group(1).strip():
+                sections[heading].append(match.group(1).strip())
+    if not any(sections.values()):
+        return "\n\n".join(answer.strip() for answer in answers if answer.strip())
+    return "\n\n".join(
+        heading + "\n" + ("\n\n".join(sections[heading]) or "None explicitly stated")
+        for heading in IMP_HEADINGS
+    )
+
+
+def _project_heading_pattern(phase_name: str) -> re.Pattern[str] | None:
+    if phase_name == "MCQs":
+        return re.compile(r"^### MCQ\s+\d+", flags=re.MULTILINE)
+    if phase_name == "Written Questions":
+        return re.compile(r"^### Question\s+\d+", flags=re.MULTILINE)
+    if phase_name == "Clinical Cases":
+        return re.compile(r"(\*\*🩺 Clinical Case )\d+(:\*\*)")
+    return None
+
+
+def _renumber_project_answer(
+    answer: str, phase_name: str, start_number: int
+) -> tuple[str, int]:
+    pattern = _project_heading_pattern(phase_name)
+    if pattern is None:
+        return answer, start_number
+    number = start_number
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal number
+        replacement = (
+            f"### MCQ {number}"
+            if phase_name == "MCQs"
+            else f"### Question {number}"
+            if phase_name == "Written Questions"
+            else f"**🩺 Clinical Case {number}:**"
+        )
+        number += 1
+        return replacement
+
+    return pattern.sub(replace, answer), number
+
+
+def _usable_query_results(query_results: list[QueryResult]) -> list[QueryResult]:
+    return [
+        query_result
+        for query_result in query_results
+        if query_result.answer.strip()
+        and query_result.answer.strip() not in {NO_MCQS, NO_WRITTEN}
+    ]
+
+
+def _query_source_names(query_results: list[QueryResult]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            name for query_result in query_results for name in query_result.source_names
+        )
+    )
+
+
+def _merge_answer_bodies(query_results: list[QueryResult], phase_name: str) -> str:
+    if phase_name == "IMP Points":
+        return _merge_imp_answers([query_result.answer for query_result in query_results])
+    answer_parts: list[str] = []
+    next_number = 1
+    for query_result in query_results:
+        numbered, next_number = _renumber_project_answer(
+            query_result.answer, phase_name, next_number
+        )
+        answer_parts.append(numbered.strip())
+    return "\n\n".join(answer_parts)
+
+
+def _merge_notebook_query_results(
+    query_results: list[QueryResult], phase_name: str
+) -> QueryResult:
+    usable = _usable_query_results(query_results)
+    if not usable:
+        merged_answer = query_results[0].answer.strip() if query_results else ""
+    else:
+        merged_answer = _merge_answer_bodies(usable, phase_name)
+    return QueryResult(
+        answer=merged_answer, source_names=_query_source_names(query_results)
+    )
+
+
+def _query_project_scope(
+    request: NlmQueryRequest, scope: ProjectQueryScope
+) -> QueryResult:
+    scoped_request = NlmQueryRequest(
+        config=request.config,
+        notebook=request.notebook,
+        query_text=request.query_text,
+        source_ids=scope.source_ids,
+        source_names=scope.source_names,
+        notebook_ids=(scope.notebook_uuid,),
+        phase_name=request.phase_name,
+        project_scopes=(scope,),
+    )
+    payload = _run_nlm_json(
+        request.config,
+        _nlm_query_arguments(
+            scoped_request,
+            notebook_id=scope.notebook_uuid,
+            source_ids=scope.source_ids,
+        ),
+        NLM_QUERY_TIMEOUT_SECONDS,
+        f"nlm notebook query ({scope.notebook_uuid})",
+    )
+    return _query_result_from_payload(payload, scoped_request)
+
+
+def _run_nlm_cli_query(request: NlmQueryRequest) -> QueryResult:
+    scopes = request.project_scopes
+    if not scopes:
+        scopes = (
+            ProjectQueryScope(
+                notebook_uuid=request.notebook.notebook_uuid,
+                source_ids=request.source_ids,
+                source_names=request.source_names,
+            ),
+        )
+    usable_scopes = tuple(scope for scope in scopes if scope.source_ids)
+    if not usable_scopes:
+        raise NlmError(
+            f"{request.phase_name or 'Query'} has no approved NotebookLM sources"
+        )
+    query_results = [
+        _query_project_scope(request, scope) for scope in usable_scopes
+    ]
+    return _merge_notebook_query_results(query_results, request.phase_name)
 
 
 def _run_query_once(query: PhaseQuery, query_text: str) -> QueryResult:
@@ -1284,6 +1699,9 @@ def _run_query_once(query: PhaseQuery, query_text: str) -> QueryResult:
             query_text=query_text,
             source_ids=query.source_ids,
             source_names=query.source_names,
+            notebook_ids=query.notebook_ids,
+            phase_name=query.phase_name,
+            project_scopes=query.project_scopes,
         )
     )
 
@@ -1419,22 +1837,69 @@ def _append_scope_source(
         aliases.append(source.title)
 
 
+def _scope_project_id(source: RemoteSource, report: Phase0Report) -> str:
+    return source.notebook_uuid or report.notebook.notebook_uuid
+
+
 def _query_scope(report: Phase0Report, local_roles: set[str]) -> QueryScope:
-    aliases: list[str] = []
-    source_ids: list[str] = []
-    authority_titles = [report.recording_source, report.slide_source]
+    project_sources: dict[str, tuple[list[str], list[str]]] = {}
+
+    def add_source(source: RemoteSource) -> None:
+        project_id = _scope_project_id(source, report)
+        aliases, source_ids = project_sources.setdefault(project_id, ([], []))
+        _append_scope_source(source, aliases, source_ids)
+
+    authority_titles = [
+        *(
+            report.recording_sources
+            or ((report.recording_source,) if report.recording_source else ())
+        ),
+        report.slide_source,
+    ]
     for title in authority_titles:
         for remote_source in _remote_sources_for_title(report, title):
-            _append_scope_source(remote_source, aliases, source_ids)
+            add_source(remote_source)
 
     for local_source in report.local_sources:
         if local_source.role not in local_roles:
             continue
         for remote_source in _remote_sources_for_local(report, local_source):
-            _append_scope_source(remote_source, aliases, source_ids)
+            add_source(remote_source)
         if _source_exists_remotely(local_source, report.remote_sources):
-            aliases.append(local_source.name)
-    return QueryScope(tuple(source_ids), tuple(dict.fromkeys(aliases)))
+            project_id = _scope_project_id(
+                next(
+                    source
+                    for source in report.remote_sources
+                    if source.normalized_name == local_source.normalized_name
+                    or (
+                        source.normalized_stem == local_source.normalized_stem
+                        and _extension_compatible(local_source.extension, source.title)
+                    )
+                ),
+                report,
+            )
+            project_sources.setdefault(project_id, ([], []))[0].append(local_source.name)
+
+    project_scopes = tuple(
+        ProjectQueryScope(
+            notebook_uuid=project_id,
+            source_ids=tuple(source_ids),
+            source_names=tuple(dict.fromkeys(aliases)),
+        )
+        for project_id, (aliases, source_ids) in project_sources.items()
+        if source_ids
+    )
+    return QueryScope(
+        source_ids=tuple(
+            source_id
+            for scope in project_scopes
+            for source_id in scope.source_ids
+        ),
+        source_names=tuple(
+            name for scope in project_scopes for name in scope.source_names
+        ),
+        project_scopes=project_scopes,
+    )
 
 
 def build_source_context(report: Phase0Report) -> str:
@@ -1470,6 +1935,20 @@ def canonical_badge_instructions(year_map: dict[int, list[str]]) -> str:
         "**[Past Exams - YYYY, YYYY]**, **[Question Bank]**, and "
         "**[Past Exams (YYYY) / IMP]**. Never use [Past Exams], "
         "[Past year from doctor], or an unverified year."
+    )
+
+
+def render_exam_style_profile(profile: dict[str, Any]) -> str:
+    """Render the agent's style observations as bounded, non-content guidance."""
+    if not profile:
+        return (
+            "No agent-supplied exam style profile is available. Infer formatting "
+            "only from the verified past-exam/question-bank samples in the source scope."
+        )
+    return (
+        "AGENT-SUPPLIED EXAM STYLE PROFILE (format guidance only; never evidence or "
+        "medical content):\n"
+        + json.dumps(profile, ensure_ascii=False, indent=2)
     )
 
 
@@ -1514,39 +1993,73 @@ booklet, attendance, exam format, and other non-medical instructions. Write in
 Egyptian Arabic mixed with English medical terms. Return the section body only."""
 
 
-def build_mcq_prompt(title: str, context: str, badge_instructions: str) -> str:
+def build_mcq_prompt(
+    title: str,
+    context: str,
+    badge_instructions: str,
+    exam_style_profile: dict[str, Any] | None = None,
+) -> str:
+    style_context = render_exam_style_profile(exam_style_profile or {})
     return f"""Create only the body of the ❓ MCQs section for '{title}'.
 
 {context}
-Extract only MCQs that match the recording's taught scope and exist verbatim in a
-verified past-exam or question-bank source. Preserve the exact question wording,
-original option count, and option wording. Do not repair or invent source
-questions. State the correct answer and give a clinical explanation in Egyptian
-Arabic mixed with precise English medical terms; explain distractors when the
-evidence supports it.
+Extract every relevant verbatim MCQ from verified past-exam or question-bank
+sources, and also create MCQs only from points the doctor explicitly emphasized
+in the recording. Preserve verbatim source questions and options; never claim
+that an IMP-only question is verbatim or from an exam. State the correct answer
+and give a concise clinical explanation in Egyptian Arabic mixed with precise
+English medical terms; explain distractors when the evidence supports it.
 
 {badge_instructions}
 
+{style_context}
+
+For IMP-only questions, imitate the observed past-exam form: stem length and
+command pattern, option count, option labels/case, punctuation, capitalization,
+parallel option length, and distractor style. The profile controls presentation
+only; derive every fact from the recording and cited evidence. Do not copy a
+sample's subject matter, wording, answer, or provenance. Keep IMP stems direct
+and exam-like rather than turning every item into a long clinical vignette.
+
 For every item use this exact field contract with ### MCQ N and its badge(s):
-**Question (verbatim):**, **Options (verbatim):**, **Source:**,
+**Question (verbatim):** for sourced items or **Question:** for IMP-only items,
+**Options (verbatim):**, **Source:** only for sourced items,
 **Correct Answer:**, and **Clinical Explanation (Egyptian Arabic):**. If no
 matching verbatim MCQ exists, return exactly {NO_MCQS}. Return section body only;
 never use # or ## headings."""
 
 
-def build_written_prompt(title: str, context: str, badge_instructions: str) -> str:
+def build_written_prompt(
+    title: str,
+    context: str,
+    badge_instructions: str,
+    exam_style_profile: dict[str, Any] | None = None,
+) -> str:
+    style_context = render_exam_style_profile(exam_style_profile or {})
     return f"""Create only the body of the ✍️ Written Questions section for '{title}'.
 
 {context}
-Extract only matching Essay, Short Note, Enumerate, Compare, Give Reason, or other
-written questions verbatim from verified exam/question-bank sources. Do not
-generate or paraphrase a falsely sourced question. Show the exact source name and
-verified year when applicable.
+Extract every matching Essay, Short Note, Enumerate, Compare, Give Reason, or
+other written question verbatim from verified exam/question-bank sources. Also
+create IMP-only written questions only from explicitly emphasized recording
+points. Do not label an IMP-only question as sourced; show a source and verified
+year only for sourced items.
 
 {badge_instructions}
 
-For every item use ### Question N with badge(s), then **Question (verbatim):**,
-**Source:**, and **Model Answer (Short):**. Answers must be concise and direct:
+{style_context}
+
+For IMP-only written questions, imitate the observed past-exam form: use the
+same short command verbs, colon/dash/blank conventions, requested number of
+items, and concise numbered-answer shape. Do not replace a direct “complete”,
+“enumerate”, “causes of”, “mechanism of”, “treatment of”, or “give reason” form
+with a long academic essay prompt unless the profile shows that pattern. The
+profile controls presentation only; derive every fact from the recording and
+cited evidence.
+
+For every item use ### Question N with badge(s), then **Question (verbatim):**
+for sourced items or **Question:** for IMP-only items, **Source:** only when
+sourced, and **Model Answer (Short):**. Answers must be concise and direct:
 short bullets for lists, one short mechanism sentence for Give Reason, and a
 compact Markdown table for Compare. No introduction, conclusion, or filler. If no
 grounded written question exists, return exactly {NO_WRITTEN}. Return section body
@@ -1645,14 +2158,16 @@ def _citations_include(query_result: QueryResult, expected_names: list[str]) -> 
     )
 
 
-def validate_guide(query_result: QueryResult, recording_source: str) -> list[str]:
+def validate_guide(
+    query_result: QueryResult, recording_sources: tuple[str, ...]
+) -> list[str]:
     errors = _body_heading_errors(query_result.answer)
     errors += _callout_errors(
         query_result.answer, {"NOTE", "IMPORTANT", "WARNING", "CAUTION"}
     )
     if len(query_result.answer) < 300:
         errors.append("chronological guide is not substantive")
-    if not _citations_include(query_result, [recording_source]):
+    if not _citations_include(query_result, list(recording_sources)):
         errors.append("citations do not include the recording authority")
     return errors
 
@@ -1696,7 +2211,8 @@ def _ungrounded_block_errors(
 ) -> list[str]:
     blocks = _section_blocks(answer, heading_prefix)
     if len(blocks) == expected_count and all(
-        _source_field_matches(block, evidence_sources) for block in blocks
+        "**[IMP]**" in block or _source_field_matches(block, evidence_sources)
+        for block in blocks
     ):
         return []
     return [f"one or more {heading_prefix} blocks lacks a verified source field"]
@@ -1737,12 +2253,14 @@ def _mcq_field_errors(answer: str, question_count: int) -> list[str]:
     errors: list[str] = []
     for field_name in (
         "**Options (verbatim):**",
-        "**Source:**",
         "**Correct Answer:**",
         "**Clinical Explanation (Egyptian Arabic):**",
     ):
         if answer.count(field_name) < question_count:
             errors.append(f"MCQ response is missing {field_name}")
+    for block in _section_blocks(answer, "MCQ"):
+        if "**[IMP]**" not in block and "**Source:**" not in block:
+            errors.append("a sourced MCQ is missing **Source:**")
     return errors
 
 
@@ -1757,9 +2275,9 @@ def validate_mcqs(
     errors = _body_heading_errors(answer)
     errors += _callout_errors(answer)
     errors += _badge_errors(answer, set(year_map))
-    question_count = answer.count("**Question (verbatim):**")
+    question_count = len(_section_blocks(answer, "MCQ"))
     if question_count < 1:
-        errors.append("MCQ response has no verbatim question field")
+        errors.append("MCQ response has no question blocks")
     errors += _mcq_field_errors(answer, question_count)
     if len(re.findall(r"[\u0600-\u06ff]", answer)) < 20:
         errors.append("MCQ clinical explanations are not in Egyptian Arabic")
@@ -1767,7 +2285,7 @@ def validate_mcqs(
         errors.append("one or more MCQs lacks a canonical badge")
     errors += _ungrounded_block_errors(answer, "MCQ", evidence_sources, question_count)
     errors += _block_year_errors(answer, "MCQ", year_map)
-    if not _citations_include(query_result, evidence_sources):
+    if "**[IMP]**" not in answer and not _citations_include(query_result, evidence_sources):
         errors.append("MCQ citations do not include an exam/question-bank source")
     return errors
 
@@ -1792,12 +2310,14 @@ def validate_written(
     errors = _body_heading_errors(answer)
     errors += _callout_errors(answer)
     errors += _badge_errors(answer, set(year_map))
-    question_count = answer.count("**Question (verbatim):**")
+    question_count = len(_section_blocks(answer, "Question"))
     if question_count < 1:
-        errors.append("written response has no verbatim question field")
-    for field_name in ("**Source:**", "**Model Answer (Short):**"):
-        if answer.count(field_name) < question_count:
-            errors.append(f"written response is missing {field_name}")
+        errors.append("written response has no question blocks")
+    if answer.count("**Model Answer (Short):**") < question_count:
+        errors.append("written response is missing **Model Answer (Short):**")
+    for block in _section_blocks(answer, "Question"):
+        if "**[IMP]**" not in block and "**Source:**" not in block:
+            errors.append("a sourced written question is missing **Source:**")
     if len(BADGE_LIKE_PATTERN.findall(answer)) < question_count:
         errors.append("one or more written questions lacks a canonical badge")
     errors += _ungrounded_block_errors(
@@ -1805,7 +2325,7 @@ def validate_written(
     )
     errors += _block_year_errors(answer, "Question", year_map)
     errors += _long_model_answer_errors(answer, 2_000)
-    if not _citations_include(query_result, evidence_sources):
+    if "**[IMP]**" not in answer and not _citations_include(query_result, evidence_sources):
         errors.append("written citations do not include an exam/question-bank source")
     return errors
 
@@ -1845,7 +2365,7 @@ def _case_block_evidence_errors(
     ):
         errors.append("a clinical-case year badge lacks matching source-year evidence")
     if _has_imp_badge(case_block) and not _citations_include(
-        query_result, [evidence.recording_source]
+        query_result, list(evidence.recording_sources)
     ):
         errors.append("an IMP clinical case does not cite the recording authority")
     return errors
@@ -1977,8 +2497,7 @@ def _document_header(identity: TranscriptIdentity) -> str:
     return (
         f"# {identity.emoji} التفريغ الأكاديمي المنسق لمحاضرة: "
         f"`{identity.title}` ({identity.subject})\n"
-        "> **المصدر الأساسي: شرح الدكتور المسجل في NotebookLM — "
-        f"`{identity.recording_source}`. "
+        "> **المصدر الأساسي: شرح الدكتور المسجل في NotebookLM. "
         "السلايدات مستخدمة للعناوين والجداول فقط.**\n"
     )
 
@@ -1986,11 +2505,45 @@ def _document_header(identity: TranscriptIdentity) -> str:
 def assemble_document(
     identity: TranscriptIdentity, sections: GeneratedSections
 ) -> str:
+    """Assemble the evidence-rich draft before the Agent's student-facing pass."""
     cleaned_sections = _clean_generated_sections(sections)
     parts = [_document_header(identity)]
     for heading, section in zip(SECTION_HEADINGS, cleaned_sections):
         parts.append(f"---\n\n{heading}\n\n{section}\n")
     return "\n".join(parts).rstrip() + "\n"
+
+
+def _remove_evidence_fields(text: str) -> str:
+    return re.sub(
+        r"(?m)^[ \t]*(?:> )?\*\*Source:\*\*.*(?:\n|$)",
+        "",
+        text,
+    )
+
+
+def finalize_student_document(draft: str, verified_years: set[int]) -> str:
+    """Remove evidence-only fields, then validate the student-facing document."""
+    finalized = format_markdown_tables(_remove_evidence_fields(draft)) + "\n"
+    validate_final_document(finalized, verified_years)
+    return finalized
+
+
+def _draft_output_path(target: OutputTarget) -> str:
+    return target.output_path + ".draft.md"
+
+
+def _save_draft(draft: str, target: OutputTarget, verified_years: set[int]) -> None:
+    finalize_student_document(draft, verified_years)
+    draft_path = _draft_output_path(target)
+    temporary_path = _prepare_temp(draft_path, draft.encode("utf-8"))
+    try:
+        os.replace(temporary_path, draft_path)
+    except OSError as error:
+        raise TranscriberError(f"Atomic draft write failed: {error}") from error
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+    print(f"[+] Saved evidence-rich draft for Agent review: {draft_path}")
 
 
 def _section_structure_errors(text: str) -> list[str]:
@@ -2022,6 +2575,18 @@ def _leaked_content_errors(text: str) -> list[str]:
         )
     ):
         errors.append("error/debug payload leaked into final Markdown")
+    if re.search(r"(?m)^[ \t]*(?:> )?\*\*Source:\*\*", text):
+        errors.append("evidence-only Source fields leaked into final Markdown")
+    if re.search(
+        r"(?i)(?<![\w.-])[^\s`|<>]+\.(?:aac|docx|m4a|md|mkv|mp3|ogg|pdf|pptx|txt|wav)(?![\w.-])",
+        text,
+    ):
+        errors.append("local source filenames leaked into final Markdown")
+    if re.search(
+        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+        text,
+    ):
+        errors.append("NotebookLM source or project IDs leaked into final Markdown")
     return errors
 
 
@@ -2188,17 +2753,45 @@ def _argument_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
         default=config.get("default_subject", "Toxicology"),
         help="Subject/Course name",
     )
+    parser.add_argument(
+        "--agent-reviewed",
+        action="store_true",
+        help="Require uploads to be limited to the agent-approved upload list",
+    )
     parser.add_argument("--emoji", help="Emoji used in the transcript filename")
     parser.add_argument("--nlm-profile", help="Optional nlm authentication profile")
-    parser.add_argument("--notebook-id", help="NotebookLM Notebook ID")
+    parser.add_argument(
+        "--notebook-id",
+        action="append",
+        help="NotebookLM project ID or title; repeat to combine projects",
+    )
     parser.add_argument("--lecture", required=True, help="Lecture title or audio filename")
     parser.add_argument("--pptx", help="Path to PPTX or PDF slides")
     parser.add_argument(
         "--recording-source",
-        help="Optional exact NotebookLM source name for the doctor's recording/audio",
+        action="append",
+        metavar="SOURCE",
+        help=(
+            "Exact NotebookLM recording source name; repeat in spoken order when "
+            "one lecture has multiple parts"
+        ),
     )
     parser.add_argument(
-        "--sources-root", help="Course root containing Lecture/Questions/Exams folders"
+        "--approved-upload",
+        action="append",
+        metavar="SOURCE",
+        help="Missing local source approved by the agent for upload; repeat as needed",
+    )
+    parser.add_argument(
+        "--exam-style-profile",
+        help="JSON object containing the agent's observed past-exam formatting profile",
+    )
+    parser.add_argument(
+        "--sources-root", help="Course root containing Lecture/Questions folders"
+    )
+    parser.add_argument(
+        "--assessment-manifest",
+        help="JSON list of agent-approved Questions/ classifications",
     )
     parser.add_argument("--filename", help="Custom output Markdown filename")
     parser.add_argument("--output-dir", help="Custom output directory")
@@ -2207,25 +2800,44 @@ def _argument_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
         action="store_true",
         help="Run the read-only Phase 0 audit without uploads or LLM queries",
     )
+    parser.add_argument(
+        "--draft-only",
+        action="store_true",
+        help="Write an evidence-rich draft for Agent review without updating Index.md",
+    )
+    parser.add_argument(
+        "--finalize-draft",
+        action="store_true",
+        help="Finalize the generated .draft.md after Agent review and update Index.md",
+    )
     return parser
 
 
-def _requested_notebook_id(
+def _requested_notebook_ids(
     args: argparse.Namespace,
     config: dict[str, Any],
     parser: argparse.ArgumentParser,
-) -> str:
+) -> tuple[str, ...]:
     subject = args.subject
-    requested_notebook_id = (
-        args.notebook_id
-        or config.get("notebook_ids", {}).get(subject)
-        or os.environ.get("NOTEBOOK_ID")
+    configured_notebooks = config.get("notebook_ids", {})
+    configured_ids = (
+        configured_notebooks.get(subject)
+        if isinstance(configured_notebooks, dict)
+        else None
     )
-    if not requested_notebook_id:
+    if isinstance(configured_ids, str):
+        configured_ids = [configured_ids]
+    environment_ids = [os.environ["NOTEBOOK_ID"]] if os.environ.get("NOTEBOOK_ID") else []
+    requested_notebook_ids = tuple(
+        args.notebook_id
+        or (configured_ids if isinstance(configured_ids, list) else [])
+        or environment_ids
+    )
+    if not requested_notebook_ids:
         parser.error(
             f"No Notebook ID provided for subject '{subject}'. Use --notebook-id or config.json."
         )
-    return str(requested_notebook_id)
+    return tuple(str(notebook_id) for notebook_id in requested_notebook_ids)
 
 
 def _output_target(
@@ -2269,11 +2881,31 @@ def _run_request(
     index_path = os.path.join(target.transcripts_dir, "Index.md")
     if os.path.abspath(target.output_path) == os.path.abspath(index_path):
         parser.error("--filename must not target the managed Index.md file")
+    exam_style_profile: dict[str, Any] = {}
+    if args.exam_style_profile:
+        try:
+            parsed_profile = json.loads(args.exam_style_profile)
+        except json.JSONDecodeError as error:
+            parser.error(f"--exam-style-profile must be valid JSON: {error}")
+        if not isinstance(parsed_profile, dict):
+            parser.error("--exam-style-profile must be a JSON object")
+        exam_style_profile = parsed_profile
+    assessment_sources: tuple[dict[str, Any], ...] = ()
+    if args.assessment_manifest:
+        try:
+            parsed_assessment = json.loads(args.assessment_manifest)
+        except json.JSONDecodeError as error:
+            parser.error(f"--assessment-manifest must be valid JSON: {error}")
+        if not isinstance(parsed_assessment, list) or not all(
+            isinstance(entry, dict) for entry in parsed_assessment
+        ):
+            parser.error("--assessment-manifest must be a JSON list of objects")
+        assessment_sources = tuple(parsed_assessment)
     return RunRequest(
         subject=subject,
-        notebook_id=_requested_notebook_id(args, config, parser),
+        notebook_ids=_requested_notebook_ids(args, config, parser),
         lecture_name=str(args.lecture),
-        recording_source=args.recording_source,
+        recording_sources=tuple(args.recording_source or ()),
         slides_path=args.pptx,
         sources_root=(
             os.path.abspath(args.sources_root) if args.sources_root else project_dir
@@ -2282,13 +2914,19 @@ def _run_request(
         emoji=str(emoji),
         target=target,
         audit_only=bool(args.audit_only),
+        approved_uploads=tuple(args.approved_upload or ()),
+        agent_reviewed=bool(args.agent_reviewed),
+        exam_style_profile=exam_style_profile,
+        assessment_sources=assessment_sources,
+        draft_only=bool(args.draft_only),
+        finalize_draft=bool(args.finalize_draft),
     )
 
 
 def _print_run_summary(request: RunRequest) -> None:
     print("\n=========================================")
     print(f"[*] Subject: {request.subject}")
-    print(f"[*] Requested Notebook: {request.notebook_id}")
+    print(f"[*] Requested Notebook projects: {', '.join(request.notebook_ids)}")
     print(f"[*] Target Lecture: {request.lecture_name}")
     print(f"[*] Sources Root: {request.sources_root}")
     print(f"[*] Destination Path: {request.target.output_path}")
@@ -2298,17 +2936,23 @@ def _print_run_summary(request: RunRequest) -> None:
 def _phase0_request(config: dict[str, Any], request: RunRequest) -> Phase0Request:
     return Phase0Request(
         config=config,
-        requested_notebook_id=request.notebook_id,
+        requested_notebook_ids=request.notebook_ids,
         subject=request.subject,
         sources_root=request.sources_root,
         lecture_name=request.lecture_name,
-        recording_source=request.recording_source,
+        recording_sources=request.recording_sources,
         slides_path=request.slides_path,
+        approved_uploads=request.approved_uploads,
+        agent_reviewed=request.agent_reviewed,
+        assessment_sources=request.assessment_sources,
     )
 
 
 def _pipeline_context(
-    config: dict[str, Any], report: Phase0Report, identity: TranscriptIdentity
+    config: dict[str, Any],
+    report: Phase0Report,
+    identity: TranscriptIdentity,
+    exam_style_profile: dict[str, Any] | None = None,
 ) -> PipelineContext:
     return PipelineContext(
         config=config,
@@ -2322,6 +2966,7 @@ def _pipeline_context(
         assessment_scope=_query_scope(
             report, {"textbook", "past_exam", "question_bank"}
         ),
+        exam_style_profile=exam_style_profile or {},
     )
 
 
@@ -2336,10 +2981,15 @@ def _query_guide(context: PipelineContext) -> QueryResult:
             ),
             phase_name="Chronological Guide",
             validator=lambda query_result: validate_guide(
-                query_result, context.report.recording_source
+                query_result, context.report.recording_sources
             ),
             source_ids=context.guide_scope.source_ids,
             source_names=context.guide_scope.source_names,
+            project_scopes=context.guide_scope.project_scopes,
+            notebook_ids=tuple(
+                notebook.notebook_uuid
+                for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
         )
     )
 
@@ -2357,6 +3007,11 @@ def _query_imp(context: PipelineContext) -> QueryResult:
             validator=validate_imp,
             source_ids=context.guide_scope.source_ids,
             source_names=context.guide_scope.source_names,
+            project_scopes=context.guide_scope.project_scopes,
+            notebook_ids=tuple(
+                notebook.notebook_uuid
+                for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
         )
     )
 
@@ -2371,6 +3026,7 @@ def _query_mcqs(context: PipelineContext) -> QueryResult:
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
+                context.exam_style_profile,
             ),
             phase_name="MCQs",
             validator=lambda query_result: validate_mcqs(
@@ -2378,6 +3034,11 @@ def _query_mcqs(context: PipelineContext) -> QueryResult:
             ),
             source_ids=context.assessment_scope.source_ids,
             source_names=context.assessment_scope.source_names,
+            project_scopes=context.assessment_scope.project_scopes,
+            notebook_ids=tuple(
+                notebook.notebook_uuid
+                for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
         )
     )
 
@@ -2392,6 +3053,7 @@ def _query_written(context: PipelineContext) -> QueryResult:
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
+                context.exam_style_profile,
             ),
             phase_name="Written Questions",
             validator=lambda query_result: validate_written(
@@ -2399,6 +3061,11 @@ def _query_written(context: PipelineContext) -> QueryResult:
             ),
             source_ids=context.assessment_scope.source_ids,
             source_names=context.assessment_scope.source_names,
+            project_scopes=context.assessment_scope.project_scopes,
+            notebook_ids=tuple(
+                notebook.notebook_uuid
+                for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
         )
     )
 
@@ -2420,11 +3087,16 @@ def _query_cases(context: PipelineContext) -> QueryResult:
                 CaseEvidence(
                     context.report.year_map,
                     context.evidence_sources,
-                    context.report.recording_source,
+                    context.report.recording_sources,
                 ),
             ),
             source_ids=context.assessment_scope.source_ids,
             source_names=context.assessment_scope.source_names,
+            project_scopes=context.assessment_scope.project_scopes,
+            notebook_ids=tuple(
+                notebook.notebook_uuid
+                for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
         )
     )
 
@@ -2445,8 +3117,8 @@ def _save_transcript(
     target: OutputTarget,
     verified_years: set[int],
 ) -> None:
-    document = assemble_document(identity, sections)
-    validate_final_document(document, verified_years)
+    draft = assemble_document(identity, sections)
+    document = finalize_student_document(draft, verified_years)
     index_path, index_content = render_index_content(identity, target)
     commit_transcript_and_index(
         target.output_path, document, index_path, index_content
@@ -2456,27 +3128,59 @@ def _save_transcript(
 
 
 def _run_pipeline(config: dict[str, Any], request: RunRequest) -> int:
+    if request.finalize_draft:
+        return _finalize_pipeline(config, request)
     report = run_phase0_sync(_phase0_request(config, request))
     identity = TranscriptIdentity(
         request.subject, request.title, request.emoji, report.recording_source
     )
-    context = _pipeline_context(config, report, identity)
-    _save_transcript(
-        identity,
-        _generated_sections(context),
-        request.target,
-        context.verified_years,
+    context = _pipeline_context(
+        config, report, identity, request.exam_style_profile
     )
+    sections = _generated_sections(context)
+    if request.draft_only:
+        _save_draft(
+            assemble_document(identity, sections),
+            request.target,
+            context.verified_years,
+        )
+    else:
+        _save_transcript(identity, sections, request.target, context.verified_years)
     print("[✔] Processing completed successfully!")
     return 0
 
 
+def _finalize_pipeline(config: dict[str, Any], request: RunRequest) -> int:
+    report = run_phase0_audit(_phase0_request(config, request))
+    if report.blocking_errors:
+        raise Phase0Error("; ".join(report.blocking_errors))
+    draft_path = _draft_output_path(request.target)
+    try:
+        draft = Path(draft_path).read_text(encoding="utf-8")
+    except OSError as error:
+        raise TranscriberError(f"Could not read draft for finalization: {draft_path}") from error
+    document = finalize_student_document(draft, set(report.year_map))
+    identity = TranscriptIdentity(
+        request.subject, request.title, request.emoji, report.recording_source
+    )
+    index_path, index_content = render_index_content(identity, request.target)
+    commit_transcript_and_index(
+        request.target.output_path, document, index_path, index_content
+    )
+    print(f"[+] Finalized reviewed transcript: {request.target.output_path}")
+    print(f"[+] Updated index: {index_path}")
+    return 0
+
+
 def main() -> int:
+    _configure_line_buffering()
     config = load_config()
     parser = _argument_parser(config)
     args = parser.parse_args()
     if args.nlm_profile:
         config = {**config, "nlm_profile": args.nlm_profile}
+    if args.draft_only and args.finalize_draft:
+        parser.error("--draft-only and --finalize-draft cannot be combined")
     request = _run_request(args, config, parser)
     _print_run_summary(request)
     try:

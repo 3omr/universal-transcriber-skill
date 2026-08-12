@@ -5,20 +5,24 @@ independent medical module. Do not use the misspelling `moduels/`.
 
 ```text
 modules/
-└── toxo/
+└── cardiology/
     ├── module.json
     ├── Lecture/
     ├── Questions/
-    ├── Exams/
     └── Transcripts/
 ```
 
 `Lecture/` holds local slides, handouts, and optionally recordings.
-`Questions/` holds question banks. `Exams/` holds past exams. `Transcripts/` is
-managed output. The launcher scans only the selected module, so sources never
-cross between modules.
+`Questions/` holds both past exams and question banks. The agent classifies each
+file from its content and records that decision in the temporary transcription
+manifest as `past_exam`, `question_bank`, or `ignore`. Every file must be listed
+for a real run. `Transcripts/` is managed output. `Exams/` is a legacy input name and
+is supported only long enough to migrate its files into `Questions/`.
 
 ## module.json
+
+The manager creates this file; the agent should not ask the user to write it by
+hand:
 
 ```json
 {
@@ -26,11 +30,10 @@ cross between modules.
   "module_id": "ent",
   "display_name": "ENT",
   "aliases": ["ear nose throat", "انف واذن"],
-  "notebook": {
-    "id": "NOTEBOOK_UUID",
-    "title": "ENT",
-    "profile": null
-  },
+  "notebooks": [
+    {"id": "NOTEBOOK_UUID", "title": "ENT"}
+  ],
+  "notebook_profile": null,
   "output": {
     "emoji": "👂",
     "language": "Egyptian Arabic mixed with English medical terminology"
@@ -41,28 +44,69 @@ cross between modules.
 }
 ```
 
+`notebooks` may contain more than one existing NotebookLM project when the user
+has explicitly chosen to combine them. The first entry is the primary upload
+target; uploads go there only, while each query keeps a separate source scope
+for each selected project. A legacy single `notebook` object is still accepted
+while modules are migrated.
+
 The directory name and `module_id` must be identical lowercase kebab-case.
-Aliases must be unique across all modules. Configure an existing NotebookLM
-notebook by exact UUID whenever possible; the manager verifies it through `nlm
-notebook list/get`. `profile` is optional and selects an existing authenticated
-`nlm` profile.
+Aliases must be unique across all modules. Paths in `lecture_slides` are
+relative to the module directory and cannot escape it.
 
-Add `lecture_slides` entries only when recording and deck names are semantically
-related but cannot be matched reliably by filename. Paths are relative to the
-module directory and cannot escape it.
+## Agent-owned creation
 
-## Safe creation
+When the user says they are starting a module, the agent should:
 
-Preview first by omitting `--apply`:
+1. Choose a safe module ID and display name.
+2. List NotebookLM projects and match by exact title or an explicitly supplied
+   ID.
+3. Use the only exact match automatically.
+4. If no match exists, create a new project on `--apply` with
+   `nlm notebook create`.
+5. If several projects match, ask whether to select one or combine several;
+   never guess.
+6. Run the manager, populate the module folders, and validate the result.
+
+Preview mode omits `--apply`; it never creates a project or directory:
 
 ```bash
 python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
   --workspace "$PWD" create --module ent --display-name ENT \
-  --alias "انف واذن" --notebook-title ENT
+  --notebook-title ENT
 ```
 
-After reviewing the resolved notebook and destination, repeat with `--apply`,
-then place course data in the three input folders. Validate at any time with:
+After the agent confirms the project choice, apply it:
+
+```bash
+python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
+  --workspace "$PWD" create --module ent --display-name ENT \
+  --notebook-title ENT --apply
+```
+
+For an intentional multi-project module, repeat `--notebook-id`:
+
+```bash
+python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
+  --workspace "$PWD" create --module ent --display-name ENT \
+  --notebook-id FIRST_NOTEBOOK_UUID --notebook-id SECOND_NOTEBOOK_UUID --apply
+```
+
+## Safe migration
+
+For an existing module that still has `Exams/`, use the manager's migration
+command. It moves files into `Questions/` and stops before any conflicting
+destination is overwritten:
+
+```bash
+python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
+  --workspace "$PWD" merge-exams --module toxo
+```
+
+The command does not delete a conflicting file or silently choose between
+duplicates. Review a conflict, then rerun after resolving it.
+
+Validate at any time with:
 
 ```bash
 python3 .agents/skills/universal-transcriber/scripts/manage_modules.py \
