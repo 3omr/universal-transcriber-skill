@@ -19,6 +19,17 @@ manifest as `past_exam`, `question_bank`, or `ignore`. Every file must be listed
 for a real run. `Transcripts/` is managed output. `Exams/` is a legacy input name and
 is supported only long enough to migrate its files into `Questions/`.
 
+The temporary transcription manifest may also contain a `references` list for
+Agent-selected books or handouts. Each entry can specify `relevance`, `topics`,
+one-based `pages`, `allow_unspoken_additions`, and a preparation `action`. The
+engine keeps originals under `Lecture/`/`Questions/` and writes derived OCR,
+conversion, compression, or page-selection artifacts under the module's ignored
+`.transcriber-cache/`; it never edits a source in place. The recording remains
+the authority for chronology and the doctor's words. A reference is used for
+terminology by default; an unspoken detail is included only when the Agent marks
+it relevant and allows it, with the visible label “إضافة من الكتاب/السلايد — لم
+يشرحها الدكتور في التسجيل”.
+
 ## module.json
 
 The manager creates this file; the agent should not ask the user to write it by

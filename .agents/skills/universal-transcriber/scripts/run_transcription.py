@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +55,12 @@ class EngineInvocation:
     assessment_manifest_provided: bool = False
     draft_only: bool = False
     finalize_draft: bool = False
+    source_manifest_path: str | None = None
+    resume_run: str | None = None
+    resume_latest: bool = False
+    retry_phase: str | None = None
+    recovery_phase: str | None = None
+    recovery_response: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,7 +70,10 @@ class SourceManifest:
     slides: str | None
     approved_uploads: tuple[str, ...]
     exam_style_profile: dict[str, Any]
+    slides_action: str = "auto"
     assessment_sources: tuple[dict[str, Any], ...] = ()
+    references: tuple[dict[str, Any], ...] = ()
+    manifest_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,12 @@ def _engine_path(workspace: Path) -> Path:
 
 
 def _load_engine(engine_path: Path) -> ModuleType:
+    # The launcher loads the engine by file path, so Python does not otherwise
+    # know the repository root or the sibling runtime package.
+    for import_root in (engine_path.parent, engine_path.parent.parent):
+        import_root_text = str(import_root)
+        if import_root_text not in sys.path:
+            sys.path.insert(0, import_root_text)
     module_spec = importlib.util.spec_from_file_location(
         "universal_transcriber_launcher_engine", engine_path
     )
@@ -337,12 +354,24 @@ def _engine_command(invocation: EngineInvocation) -> list[str]:
                 ),
             ]
         )
+    if invocation.source_manifest_path:
+        command.extend(["--source-manifest", invocation.source_manifest_path])
     if invocation.title:
         command.append("--agent-reviewed")
     if invocation.draft_only:
         command.append("--draft-only")
     if invocation.finalize_draft:
         command.append("--finalize-draft")
+    if invocation.resume_run:
+        command.extend(["--resume-run", invocation.resume_run])
+    if invocation.resume_latest:
+        command.append("--resume-latest")
+    if invocation.retry_phase:
+        command.extend(["--retry-phase", invocation.retry_phase])
+    if invocation.recovery_phase:
+        command.extend(["--recovery-phase", invocation.recovery_phase])
+    if invocation.recovery_response:
+        command.extend(["--recovery-response", invocation.recovery_response])
     if invocation.module.notebook.profile:
         command.extend(["--nlm-profile", invocation.module.notebook.profile])
     return command
@@ -364,15 +393,28 @@ def _read_source_manifest(path: str) -> dict[str, Any]:
 def _manifest_recording_names(payload: dict[str, Any]) -> tuple[str, ...]:
     recordings = payload.get("recording_sources")
     if not isinstance(recordings, list) or not recordings or not all(
-        isinstance(item, str) and item.strip() for item in recordings
+        isinstance(item, (str, dict)) and _manifest_source_name(item) for item in recordings
     ):
         raise LauncherError(
             "Source manifest requires a non-empty recording_sources list"
         )
-    normalized_recordings = [item.casefold().strip() for item in recordings]
+    names = [_manifest_source_name(item) for item in recordings]
+    normalized_recordings = [item.casefold().strip() for item in names]
     if len(set(normalized_recordings)) != len(normalized_recordings):
         raise LauncherError("Source manifest cannot repeat a recording source")
-    return tuple(item.strip() for item in recordings)
+    return tuple(item.strip() for item in names)
+
+
+def _manifest_source_name(item: str | dict[str, Any]) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return ""
+    for key in ("source", "path", "name"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _manifest_upload_names(payload: dict[str, Any]) -> tuple[str, ...]:
@@ -434,6 +476,29 @@ def _manifest_assessment_sources(payload: dict[str, Any]) -> tuple[dict[str, Any
                 "Each assessment source requires path and type "
                 "(past_exam, question_bank, or ignore)"
             )
+        has_year = source.get("year") is not None
+        has_years = source.get("years") is not None
+        if source_type == "past_exam" and not (has_year or has_years):
+            raise LauncherError(
+                f"Past exam manifest entry requires year or years: {path}"
+            )
+        if source_type != "past_exam" and (has_year or has_years):
+            raise LauncherError(
+                f"Only past_exam entries may declare year or years: {path}"
+            )
+        if has_year and has_years:
+            single = {str(source.get("year")).strip()}
+            raw_years = source.get("years")
+            if not isinstance(raw_years, list):
+                raw_years = [raw_years]
+            multiple = {
+                str(value).strip()
+                for value in raw_years
+            }
+            if single != multiple:
+                raise LauncherError(
+                    f"Manifest year and years conflict for assessment source: {path}"
+                )
         normalized_path = os.path.normpath(path)
         if normalized_path.startswith("..") or not (
             normalized_path == "Questions"
@@ -447,6 +512,31 @@ def _manifest_assessment_sources(payload: dict[str, Any]) -> tuple[dict[str, Any
     return tuple(normalized)
 
 
+def _manifest_references(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    references = payload.get("references", [])
+    if not isinstance(references, list) or not all(
+        isinstance(reference, dict) for reference in references
+    ):
+        raise LauncherError("Source manifest references must be an object list")
+    normalized: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for reference in references:
+        path = _manifest_source_name(reference)
+        if not path:
+            raise LauncherError("Each reference requires a path or source")
+        normalized_path = os.path.normpath(path)
+        if normalized_path.startswith("..") or not normalized_path.startswith(
+            ("Lecture" + os.sep, "Questions" + os.sep)
+        ):
+            raise LauncherError("Manifest reference paths must stay under Lecture/ or Questions/")
+        key = normalized_path.casefold()
+        if key in paths:
+            raise LauncherError(f"Source manifest repeats reference: {path}")
+        paths.add(key)
+        normalized.append({**reference, "path": normalized_path})
+    return tuple(normalized)
+
+
 def _source_manifest(path: str) -> SourceManifest:
     payload = _read_source_manifest(path)
     recordings = _manifest_recording_names(payload)
@@ -454,17 +544,36 @@ def _source_manifest(path: str) -> SourceManifest:
     if not isinstance(title, str) or not title.strip():
         raise LauncherError("Source manifest requires a non-empty title")
     slides = payload.get("slides")
-    if slides is not None and (
-        not isinstance(slides, str) or not slides.strip()
-    ):
-        raise LauncherError("Source manifest slides must be a string when supplied")
+    slides_action = "auto"
+    if slides is not None:
+        slides_name = _manifest_source_name(slides)
+        if not slides_name:
+            raise LauncherError("Source manifest slides must include a path")
+        if isinstance(slides, dict):
+            slides_action = str(slides.get("action", "auto")).strip().casefold()
+        slides = slides_name
+    if slides_action not in {
+        "auto",
+        "use",
+        "use_remote",
+        "convert",
+        "ocr",
+        "compress",
+        "chunk",
+        "ignore",
+        "wait",
+    }:
+        raise LauncherError(f"Unsupported slides action: {slides_action}")
     return SourceManifest(
         title=title.strip(),
         recording_sources=recordings,
         slides=slides.strip() if isinstance(slides, str) else None,
+        slides_action=slides_action,
         approved_uploads=_manifest_upload_names(payload),
         exam_style_profile=_manifest_exam_style_profile(payload),
         assessment_sources=_manifest_assessment_sources(payload),
+        references=_manifest_references(payload),
+        manifest_path=str(Path(path).expanduser().resolve()),
     )
 
 
@@ -504,14 +613,48 @@ def _print_modules(modules: list[ModuleConfig]) -> None:
         print(f"- {module.module_id}: {module.display_name} -> {notebooks}")
 
 
+def _lecture_key(
+    module: ModuleConfig, recording: Any, manifest: SourceManifest | None
+) -> str:
+    title = manifest.title if manifest else recording.title
+    recordings = manifest.recording_sources if manifest else (recording.title,)
+    identity_parts = (module.module_id, title, *recordings)
+    normalized = "\n".join(
+        unicodedata.normalize("NFKC", part).strip().casefold().replace("\\", "/")
+        for part in identity_parts
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 @contextmanager
-def _module_lock(module: ModuleConfig) -> Iterator[None]:
-    lock_path = module.paths.root / ".transcriber.lock"
+def _lecture_lock(
+    module: ModuleConfig, recording: Any, manifest: SourceManifest | None
+) -> Iterator[None]:
+    lecture_key = _lecture_key(module, recording, manifest)
+    lock_directory = module.paths.root / ".transcriber-cache" / "locks"
+    lock_directory.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_directory / f"lecture-{lecture_key}.lock"
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise LauncherError(f"Module '{module.module_id}' is already running") from error
+            title = manifest.title if manifest else recording.title
+            raise LauncherError(
+                f"Lecture '{title}' is already running (key: {lecture_key})"
+            ) from error
+        lock_file.seek(0)
+        lock_file.truncate()
+        json.dump(
+            {
+                "lecture_key": lecture_key,
+                "module": module.module_id,
+                "title": manifest.title if manifest else recording.title,
+                "pid": os.getpid(),
+            },
+            lock_file,
+            ensure_ascii=False,
+        )
+        lock_file.flush()
         yield
 
 
@@ -555,11 +698,12 @@ def _execute_recording(
         recording, additional = selected[0], selected[1:]
         title = manifest.title
         approved_uploads = manifest.approved_uploads
-        slides = (
-            _requested_slides(manifest.slides, context.module)
-            if manifest.slides
-            else None
-        )
+        if manifest.slides and manifest.slides_action != "ignore":
+            slides = (
+                Path(manifest.slides)
+                if manifest.slides_action == "use_remote"
+                else _requested_slides(manifest.slides, context.module)
+            )
     else:
         slides = _slides_path(args.slides, context, recording.title)
     invocation = EngineInvocation(
@@ -576,6 +720,12 @@ def _execute_recording(
         assessment_manifest_provided=manifest is not None,
         draft_only=args.draft_only,
         finalize_draft=args.finalize_draft,
+        source_manifest_path=(manifest.manifest_path if manifest else None),
+        resume_run=getattr(args, "resume_run", None),
+        resume_latest=bool(getattr(args, "resume_latest", False)),
+        retry_phase=getattr(args, "retry_phase", None),
+        recovery_phase=getattr(args, "recovery_phase", None),
+        recovery_response=getattr(args, "recovery_response", None),
     )
     command = _engine_command(invocation)
     if args.audit_only:
@@ -592,8 +742,8 @@ def _execute_selected(
     if not selected:
         print(f"All recordings in module '{context.module.module_id}' are transcribed.")
         return 0
-    with _module_lock(context.module):
-        for recording in selected:
+    for recording in selected:
+        with _lecture_lock(context.module, recording, manifest):
             exit_code = _execute_recording(args, context, recording, manifest)
             if exit_code != 0:
                 return exit_code
@@ -619,6 +769,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--list-modules", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument(
+        "--sync-sources",
+        action="store_true",
+        help="Run the Agent-supervised module-wide source synchronization workflow",
+    )
+    parser.add_argument(
+        "--source-sync-manifest",
+        help="Agent-approved module source synchronization manifest",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute an approved source synchronization plan",
+    )
     output_mode = parser.add_mutually_exclusive_group()
     output_mode.add_argument(
         "--draft-only",
@@ -630,6 +794,26 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Finalize the reviewed .draft.md and update the transcript/index",
     )
+    parser.add_argument("--resume-run", help="Resume a saved run by ID or checkpoint directory")
+    parser.add_argument(
+        "--resume-latest",
+        action="store_true",
+        help="Resume the newest incomplete run for this lecture",
+    )
+    parser.add_argument(
+        "--retry-phase",
+        choices=("guide", "imp", "mcqs", "written", "cases"),
+        help="Retry this phase and dependent phases from a saved run",
+    )
+    parser.add_argument(
+        "--recovery-phase",
+        choices=("guide", "imp", "mcqs", "written", "cases"),
+        help="Phase repaired by the Agent response supplied with --recovery-response",
+    )
+    parser.add_argument(
+        "--recovery-response",
+        help="Path inside the run cache to the Agent-repaired phase response",
+    )
     return parser
 
 
@@ -640,11 +824,65 @@ def main() -> int:
             reconfigure(line_buffering=True)
     args = _parser().parse_args()
     try:
+        if bool(args.recovery_phase) != bool(args.recovery_response):
+            raise LauncherError(
+                "--recovery-phase and --recovery-response must be supplied together"
+            )
+        if args.recovery_response and not (args.resume_run or args.resume_latest):
+            raise LauncherError("Agent recovery requires --resume-run or --resume-latest")
+        if args.recovery_response and args.retry_phase:
+            raise LauncherError("Agent recovery cannot be combined with --retry-phase")
         workspace = Path(args.workspace).expanduser().resolve()
         if args.list_modules:
             _print_modules(discover_modules(workspace, args.modules_root))
             return 0
         context = _launcher_context(args)
+        if args.sync_sources:
+            if args.lecture or args.all or args.list or args.slides or args.source_manifest:
+                raise LauncherError(
+                    "--sync-sources cannot be combined with lecture selection or --source-manifest"
+                )
+            if args.apply == args.audit_only:
+                raise LauncherError(
+                    "--sync-sources requires exactly one of --audit-only or --apply"
+                )
+            from source_sync import (
+                SourceSyncError,
+                SourceSyncRequest,
+                apply_source_sync,
+                audit_source_sync,
+                discover_local_sources,
+                render_source_sync_report,
+            )
+
+            if not args.source_sync_manifest:
+                if args.apply:
+                    raise LauncherError("--apply requires --source-sync-manifest")
+                print("\n=== Module Source Sync Inventory ===")
+                print(f"Module: {context.module.module_id}")
+                for path in discover_local_sources(context.module.paths.root):
+                    print(f"[PENDING AGENT REVIEW] {path}")
+                print("Create an Agent-reviewed manifest, then rerun the audit.")
+                print("=== End Module Source Sync Inventory ===\n")
+                return 0
+            try:
+                sync_request = SourceSyncRequest(
+                    context.engine,
+                    context.config,
+                    context.module.module_id,
+                    context.module.paths.root,
+                    context.notebooks,
+                    args.source_sync_manifest,
+                )
+                report = (
+                    apply_source_sync(sync_request)
+                    if args.apply
+                    else audit_source_sync(sync_request)
+                )
+            except SourceSyncError as error:
+                raise LauncherError(str(error)) from error
+            print(render_source_sync_report(report))
+            return 0 if report.status in {"planned", "completed"} else 1
         recordings = _recordings(
             context.engine,
             tuple(notebook.notebook_uuid for notebook in context.notebooks),
@@ -679,6 +917,15 @@ def main() -> int:
                     "run --audit-only first and pass --source-manifest"
                 )
             selected = _selected_recordings(_selection(args, context, recordings))
+        if not args.audit_only:
+            from source_sync import source_sync_preflight
+
+            pending_sync = source_sync_preflight(context.module.paths.root)
+            if pending_sync:
+                raise LauncherError(
+                    "Module source sync requires Agent review before transcription: "
+                    + "; ".join(pending_sync)
+                )
         return _execute_selected(args, context, selected, manifest)
     except (LauncherError, ModuleConfigError, OSError) as error:
         print(f"[Launcher Error] {error}", file=sys.stderr)
