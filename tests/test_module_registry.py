@@ -40,6 +40,64 @@ LAUNCHER_SPEC.loader.exec_module(launcher)
 
 
 class ModuleRegistryTests(unittest.TestCase):
+    def test_different_lecture_locks_can_run_in_same_module(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            module = SimpleNamespace(
+                module_id="toxo",
+                paths=SimpleNamespace(root=Path(temporary_directory)),
+            )
+            first = SimpleNamespace(title="Corrosives.m4a")
+            second = SimpleNamespace(title="Volatile.m4a")
+
+            with launcher._lecture_lock(module, first, None):
+                with launcher._lecture_lock(module, second, None):
+                    pass
+
+    def test_same_lecture_lock_rejects_duplicate_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            module = SimpleNamespace(
+                module_id="toxo",
+                paths=SimpleNamespace(root=Path(temporary_directory)),
+            )
+            recording = SimpleNamespace(title="Corrosives.m4a")
+
+            with launcher._lecture_lock(module, recording, None):
+                with self.assertRaises(launcher.LauncherError):
+                    with launcher._lecture_lock(module, recording, None):
+                        pass
+
+    def test_multipart_lecture_key_uses_ordered_manifest_recordings(self) -> None:
+        module = SimpleNamespace(module_id="toxo")
+        recording = SimpleNamespace(title="Part 1.m4a")
+        first_order = SimpleNamespace(
+            title="Corrosives",
+            recording_sources=("Part 1.m4a", "Part 2.m4a"),
+        )
+        second_order = SimpleNamespace(
+            title="Corrosives",
+            recording_sources=("Part 2.m4a", "Part 1.m4a"),
+        )
+
+        self.assertNotEqual(
+            launcher._lecture_key(module, recording, first_order),
+            launcher._lecture_key(module, recording, second_order),
+        )
+
+    def test_lecture_key_normalizes_path_separators(self) -> None:
+        module = SimpleNamespace(module_id="toxo")
+        recording = SimpleNamespace(title="Lecture\\Part 1.m4a")
+        windows_manifest = SimpleNamespace(
+            title="Corrosives", recording_sources=("Lecture\\Part 1.m4a",)
+        )
+        posix_manifest = SimpleNamespace(
+            title="Corrosives", recording_sources=("Lecture/Part 1.m4a",)
+        )
+
+        self.assertEqual(
+            launcher._lecture_key(module, recording, windows_manifest),
+            launcher._lecture_key(module, recording, posix_manifest),
+        )
+
     def test_alias_selects_only_its_module_and_resolves_configured_slide(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory)
@@ -108,6 +166,145 @@ class ModuleRegistryTests(unittest.TestCase):
 
             with self.assertRaises(launcher.LauncherError):
                 launcher._source_manifest(str(manifest_path))
+
+    def test_source_manifest_accepts_object_sources_and_reference_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "title": "Corrosives",
+                        "recording_sources": [
+                            {"source": "Corrosive 1.m4a", "action": "use_remote"}
+                        ],
+                        "slides": {"path": "Lecture/slides.ppt", "action": "convert"},
+                        "references": [
+                            {
+                                "path": "Lecture/book.pdf",
+                                "type": "textbook",
+                                "action": "ocr",
+                                "allow_unspoken_additions": True,
+                            }
+                        ],
+                        "exam_style_profile": {"mcq": {"options": {"count": 4}}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = launcher._source_manifest(str(manifest_path))
+
+        self.assertEqual(manifest.recording_sources, ("Corrosive 1.m4a",))
+        self.assertEqual(manifest.slides, "Lecture/slides.ppt")
+        self.assertEqual(manifest.references[0]["action"], "ocr")
+
+    def test_source_manifest_accepts_multiple_assessment_years(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "title": "Corrosives",
+                        "recording_sources": ["corrosives.m4a"],
+                        "assessment_sources": [
+                            {
+                                "path": "Questions/Past Exams Collection.pdf",
+                                "type": "past_exam",
+                                "years": [2022, 2024, 2025],
+                            }
+                        ],
+                        "exam_style_profile": {"mcq": {"options": {"count": 4}}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = launcher._source_manifest(str(manifest_path))
+
+        self.assertEqual(
+            manifest.assessment_sources[0]["years"], [2022, 2024, 2025]
+        )
+
+    def test_source_manifest_rejects_conflicting_year_and_years(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "title": "Corrosives",
+                        "recording_sources": ["corrosives.m4a"],
+                        "assessment_sources": [
+                            {
+                                "path": "Questions/Final.pdf",
+                                "type": "past_exam",
+                                "year": 2025,
+                                "years": [2024, 2025],
+                            }
+                        ],
+                        "exam_style_profile": {"mcq": {"options": {"count": 4}}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(launcher.LauncherError):
+                launcher._source_manifest(str(manifest_path))
+
+    def test_engine_command_forwards_checkpoint_recovery_flags(self) -> None:
+        module = SimpleNamespace(
+            display_name="Toxicology",
+            emoji="🧪",
+            notebook=SimpleNamespace(profile=None),
+            paths=SimpleNamespace(root=Path("."), transcripts=Path("Transcripts")),
+            module_id="toxo",
+        )
+        recording = SimpleNamespace(title="lecture.m4a")
+        invocation = launcher.EngineInvocation(
+            engine_path=Path("engine.py"),
+            module=module,
+            notebook_ids=("notebook",),
+            recording=recording,
+            slides_path=None,
+            resume_run="run-id",
+            retry_phase="written",
+        )
+
+        command = launcher._engine_command(invocation)
+
+        self.assertIn("--resume-run", command)
+        self.assertIn("run-id", command)
+        self.assertEqual(command[-2:], ["--retry-phase", "written"])
+
+    def test_engine_command_forwards_agent_recovery_response(self) -> None:
+        module = SimpleNamespace(
+            display_name="Toxicology",
+            emoji="🧪",
+            notebook=SimpleNamespace(profile=None),
+            paths=SimpleNamespace(root=Path("."), transcripts=Path("Transcripts")),
+            module_id="toxo",
+        )
+        invocation = launcher.EngineInvocation(
+            engine_path=Path("engine.py"),
+            module=module,
+            notebook_ids=("notebook",),
+            recording=SimpleNamespace(title="lecture.m4a"),
+            slides_path=None,
+            resume_run="run-id",
+            recovery_phase="written",
+            recovery_response="/cache/phase-written-response.md",
+        )
+
+        command = launcher._engine_command(invocation)
+
+        self.assertEqual(
+            command[-4:],
+            [
+                "--recovery-phase",
+                "written",
+                "--recovery-response",
+                "/cache/phase-written-response.md",
+            ],
+        )
 
     def test_source_manifest_rejects_repeated_approved_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

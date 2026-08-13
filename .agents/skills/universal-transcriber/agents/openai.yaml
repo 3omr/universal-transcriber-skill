@@ -1,4 +1,4 @@
 interface:
   display_name: "Universal Medical Transcriber"
-  short_description: "Transcribe any medical module from NotebookLM"
-  default_prompt: "Use $universal-transcriber to create or resolve the selected medical module, organize its Questions sources, and transcribe a named lecture."
+  short_description: "Transcribe lectures with parallel agents"
+  default_prompt: "Use $universal-transcriber to audit a medical module and transcribe its pending lectures with one native sub-agent per resolved lecture."
