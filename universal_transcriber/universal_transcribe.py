@@ -28,6 +28,7 @@ try:
     from universal_transcriber.source_preparation import (
         PreparationReport,
         PreparedSource,
+        automatic_preparation_manifest,
         prepare_manifest_sources,
         render_preparation_report,
     )
@@ -35,6 +36,7 @@ except ModuleNotFoundError:  # Direct execution from universal_transcriber/.
     from source_preparation import (  # type: ignore[no-redef]
         PreparationReport,
         PreparedSource,
+        automatic_preparation_manifest,
         prepare_manifest_sources,
         render_preparation_report,
     )
@@ -308,6 +310,7 @@ class Phase0Report:
     unsupported: list[LocalSource] = field(default_factory=list)
     ignored: list[LocalSource] = field(default_factory=list)
     uploaded: list[LocalSource] = field(default_factory=list)
+    replacements: list[SourceReplacement] = field(default_factory=list)
     year_map: dict[int, list[str]] = field(default_factory=dict)
     question_banks: list[str] = field(default_factory=list)
     question_bank_links: dict[str, list[str]] = field(default_factory=dict)
@@ -1237,6 +1240,13 @@ def verify_document_text(local_sources: list[LocalSource]) -> None:
                 f"{source.preparation_action} will create the searchable upload artifact",
             )
             continue
+        if source.preparation_action == "use_remote":
+            source.ocr = OCRReport(
+                source.path,
+                "remote",
+                "A ready NotebookLM equivalent is authoritative; local text is not required",
+            )
+            continue
         report: OCRReport | None = None
         text_years: tuple[int, ...] = ()
         effective_extension = source.upload_extension
@@ -2027,7 +2037,7 @@ def _issue_is_in_selected_scope(source: LocalSource, report: Phase0Report) -> bo
 
 def _print_ocr_and_matching_issues(report: Phase0Report) -> None:
     for source in report.local_sources:
-        if source.ocr and source.ocr.status != "pass":
+        if source.ocr and source.ocr.status not in {"pass", "remote"}:
             prefix = "" if _issue_is_in_selected_scope(source, report) else "UNRELATED "
             print(
                 f"[{prefix}{source.ocr.status.upper()}] {source.relative_path}: "
@@ -2067,6 +2077,7 @@ def print_phase0_report(report: Phase0Report) -> None:
     print(f"Ambiguous (skipped): {len(report.ambiguous)}")
     print(f"Missing before upload: {len(report.missing_before_upload)}")
     print(f"Uploaded now: {len(report.uploaded)}")
+    print(f"Remote replacements: {len(report.replacements)}")
     print(f"Unsupported (not uploaded): {len(report.unsupported)}")
     print(f"Agent-ignored: {len(report.ignored)}")
     if report.year_map:
@@ -2079,6 +2090,11 @@ def print_phase0_report(report: Phase0Report) -> None:
     if report.preparation:
         print(render_preparation_report(report.preparation))
     _print_ocr_and_matching_issues(report)
+    for replacement in report.replacements:
+        print(
+            f"[REPLACED] {replacement.old_source_name} -> "
+            f"{replacement.new_source_name} ({replacement.local_path})"
+        )
     _print_source_authority(report)
     print("=== End Phase 0 ===\n")
 
@@ -2160,9 +2176,12 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
     remote_sources: list[RemoteSource] = []
     for notebook in notebooks:
         remote_sources.extend(list_remote_sources(notebook.notebook_uuid, request.config))
+    preparation_manifest = request.preparation_manifest
+    if preparation_manifest is None:
+        preparation_manifest = automatic_preparation_manifest(request.sources_root)
     preparation = prepare_manifest_sources(
         request.sources_root,
-        request.preparation_manifest,
+        preparation_manifest,
         execute=request.prepare_sources,
         remote_titles=tuple(
             source.title
@@ -2399,6 +2418,107 @@ def _upload_candidates_after_remote_recheck(
     return waiting_candidates
 
 
+def _prepared_remote_conflicts(
+    source: LocalSource,
+    remote_sources: list[RemoteSource],
+    notebook_uuid: str,
+) -> list[RemoteSource]:
+    if source.preparation_action not in {"convert", "ocr"}:
+        return []
+    if not source.prepared_sha256:
+        return []
+    return [
+        remote
+        for remote in remote_sources
+        if (not remote.notebook_uuid or remote.notebook_uuid == notebook_uuid)
+        and _remote_source_is_ready(remote)
+        and remote.content_hash
+        and _remote_matches_local_name(source, remote)
+        and not _remote_hash_matches(source, remote)
+    ]
+
+
+def _prepared_remote_conflict_map(
+    report: Phase0Report,
+    upload_candidates: list[LocalSource],
+) -> dict[str, list[RemoteSource]]:
+    conflict_map: dict[str, list[RemoteSource]] = {}
+    for source in upload_candidates:
+        matches = _prepared_remote_conflicts(
+            source, report.remote_sources, report.notebook.notebook_uuid
+        )
+        if matches:
+            conflict_map[source.relative_path] = matches
+    return conflict_map
+
+
+def _delete_prepared_remote_conflicts(
+    request: Phase0Request,
+    report: Phase0Report,
+    upload_candidates: list[LocalSource],
+) -> dict[str, RemoteSource]:
+    conflict_map = _prepared_remote_conflict_map(report, upload_candidates)
+    ambiguous_paths = [
+        relative_path
+        for relative_path, matches in conflict_map.items()
+        if len(matches) > 1
+    ]
+    for relative_path in ambiguous_paths:
+        report.blocking_errors.append(
+            f"Cannot replace '{relative_path}': "
+            f"{len(conflict_map[relative_path])} conflicting remote sources match"
+        )
+    if ambiguous_paths:
+        return {}
+
+    conflicts: dict[str, RemoteSource] = {}
+    for relative_path, matches in conflict_map.items():
+        old_remote = matches[0]
+        _delete_remote_source(request.config, report.notebook, old_remote.source_id)
+        refreshed = _wait_for_remote_source_absent(
+            request.config, report.notebook, old_remote.source_id
+        )
+        report.remote_sources = _replace_project_inventory(
+            report.remote_sources, report.notebook.notebook_uuid, refreshed
+        )
+        conflicts[relative_path] = old_remote
+    return conflicts
+
+
+def _record_prepared_replacements(
+    report: Phase0Report,
+    conflicts: dict[str, RemoteSource],
+    refreshed_sources: list[RemoteSource],
+) -> None:
+    by_path = {source.relative_path: source for source in report.local_sources}
+    for relative_path, old_remote in conflicts.items():
+        local = by_path[relative_path]
+        matches = [
+            remote
+            for remote in refreshed_sources
+            if _remote_source_is_ready(remote)
+            and _remote_matches_local_name(local, remote)
+            and _source_exists_remotely(local, [remote])
+        ]
+        if len(matches) != 1:
+            report.blocking_errors.append(
+                f"Replacement upload for '{relative_path}' did not produce "
+                "exactly one ready NotebookLM source"
+            )
+            continue
+        replacement = matches[0]
+        report.replacements.append(
+            SourceReplacement(
+                report.notebook.notebook_uuid,
+                old_remote.source_id,
+                old_remote.title,
+                relative_path,
+                replacement.source_id,
+                replacement.title,
+            )
+        )
+
+
 def _upload_phase0_sources(request: Phase0Request, report: Phase0Report) -> None:
     # NotebookLM's source list is eventually consistent.  Refresh once before
     # enforcing the Agent's approved-upload boundary so a source that has just
@@ -2450,6 +2570,11 @@ def _upload_phase0_sources(request: Phase0Request, report: Phase0Report) -> None
         )
         if report.blocking_errors:
             return
+        conflicts = _delete_prepared_remote_conflicts(
+            request, report, waiting_candidates
+        )
+        if report.blocking_errors:
+            return
         uploaded, refreshed_primary_sources = upload_missing_sources(
             request.config,
             report.notebook,
@@ -2461,6 +2586,9 @@ def _upload_phase0_sources(request: Phase0Request, report: Phase0Report) -> None
             report.remote_sources,
             report.notebook.notebook_uuid,
             refreshed_primary_sources,
+        )
+        _record_prepared_replacements(
+            report, conflicts, refreshed_primary_sources
         )
         _refresh_evidence_metadata(report)
 

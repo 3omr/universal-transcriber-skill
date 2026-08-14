@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from universal_transcriber import source_sync
 from universal_transcriber import universal_transcribe as engine
 from universal_transcriber.source_sync import (
     SourceSyncRequest,
@@ -16,6 +17,68 @@ from universal_transcriber.source_sync import (
 
 
 class SourceSyncTests(unittest.TestCase):
+    def test_apply_replaces_one_conflicting_converted_remote_source(self) -> None:
+        source = engine.LocalSource(
+            path="/module/.transcriber-cache/converted/slides.pdf",
+            relative_path="Lecture/slides.ppt",
+            name="slides.ppt",
+            normalized_name=engine.normalize_source_key("slides.ppt"),
+            normalized_stem=engine.normalize_source_stem("slides.ppt"),
+            extension=".ppt",
+            size=10,
+            role="slides",
+            preparation_action="convert",
+            preparation_status="ready",
+            prepared_extension=".pdf",
+            prepared_sha256="new-hash",
+        )
+        notebook = engine.NotebookTarget("library", "notebook-id", "url", "Toxo")
+        old_remote = engine.RemoteSource(
+            "old-id",
+            "slides.pdf",
+            engine.normalize_source_key("slides.pdf"),
+            engine.normalize_source_stem("slides.pdf"),
+            notebook_uuid="notebook-id",
+            content_hash="old-hash",
+            status="ready",
+        )
+        new_remote = engine.RemoteSource(
+            "new-id",
+            "slides.pdf",
+            engine.normalize_source_key("slides.pdf"),
+            engine.normalize_source_stem("slides.pdf"),
+            notebook_uuid="notebook-id",
+            content_hash="new-hash",
+            status="ready",
+        )
+        request = source_sync.NotebookSyncRequest(
+            engine=engine,
+            config={},
+            notebook=notebook,
+            source=source,
+            execute=True,
+            allow_upload=True,
+        )
+
+        with patch.object(engine, "list_remote_sources", return_value=[old_remote]), patch.object(
+            engine, "_delete_remote_source"
+        ) as deleted, patch.object(
+            engine, "_wait_for_remote_source_absent", return_value=[]
+        ) as waited, patch.object(
+            engine,
+            "_upload_source_with_retries",
+            return_value=engine.UploadOutcome([new_remote], True),
+        ) as uploaded:
+            status, uploaded_by_run = source_sync._notebook_status(request)
+
+        self.assertEqual(status.status, "uploaded")
+        self.assertEqual(status.replaced_source_id, "old-id")
+        self.assertEqual(status.replaced_source_title, "slides.pdf")
+        self.assertTrue(uploaded_by_run)
+        deleted.assert_called_once_with({}, notebook, "old-id")
+        waited.assert_called_once_with({}, notebook, "old-id")
+        uploaded.assert_called_once_with({}, notebook, source)
+
     def _manifest(
         self,
         root: Path,
