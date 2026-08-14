@@ -1,12 +1,59 @@
+import subprocess
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
-from universal_transcriber.source_preparation import prepare_manifest_sources
+from universal_transcriber.source_preparation import (
+    _ocr_pdf,
+    automatic_preparation_manifest,
+    prepare_manifest_sources,
+)
 
 
 class SourcePreparationTests(unittest.TestCase):
+    def test_automatic_manifest_covers_legacy_slides_and_question_pdfs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "Lecture").mkdir()
+            (root / "Questions").mkdir()
+            (root / "Lecture" / "wounds.ppsx").write_bytes(b"slides")
+            (root / "Questions" / "Final.pdf").write_bytes(b"exam")
+
+            manifest = automatic_preparation_manifest(root)
+
+        self.assertEqual(
+            [entry["path"] for entry in manifest["sources"]],
+            ["Lecture/wounds.ppsx", "Questions/Final.pdf"],
+        )
+        self.assertTrue(all(entry["action"] == "auto" for entry in manifest["sources"]))
+
+    def test_ocr_forces_replacement_with_bilingual_deskewed_text_layer(self) -> None:
+        commands: list[list[str]] = []
+
+        def capture_tool(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "scan.pdf"
+            destination = Path(temporary_directory) / "scan-ocr.pdf"
+            source.write_bytes(b"pdf")
+            with patch(
+                "universal_transcriber.source_preparation.shutil.which",
+                return_value="ocrmypdf",
+            ), patch(
+                "universal_transcriber.source_preparation.subprocess.run",
+                side_effect=capture_tool,
+            ):
+                _ocr_pdf(source, destination, "eng+ara")
+
+        self.assertEqual(
+            commands[0][1:6],
+            ["--force-ocr", "--deskew", "--language", "eng+ara", str(source)],
+        )
+
     def test_concurrent_preparation_reuses_one_complete_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             source_root = Path(temporary_directory)

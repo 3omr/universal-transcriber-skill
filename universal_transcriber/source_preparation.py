@@ -41,6 +41,7 @@ SUPPORTED_UPLOAD_EXTENSIONS = {
     ".ogg",
 }
 SLIDE_EXTENSIONS = {".ppt", ".pptx", ".pps", ".ppsx"}
+AUTO_PREPARATION_ROOTS = ("Lecture", "Questions", "Exams")
 LEGACY_DOCUMENT_EXTENSIONS = {".doc", ".xls", ".xlsx", ".odt", ".rtf", ".epub"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov"}
 ACTION_NAMES = {
@@ -60,6 +61,31 @@ CACHE_DIRS = {
     "compress": "compressed",
     "chunk": "chunks",
 }
+
+
+def automatic_preparation_manifest(source_root: str | Path) -> dict[str, list[dict[str, str]]]:
+    """Build safe ``auto`` preparation entries for the module inventory.
+
+    This manifest only selects deterministic format preparation.  It does not
+    classify assessment provenance or decide which sources belong to a lecture.
+    Those decisions remain owned by the agent's source manifest.
+    """
+    root = Path(source_root).expanduser().resolve()
+    entries: list[dict[str, str]] = []
+    for root_name in AUTO_PREPARATION_ROOTS:
+        directory = root / root_name
+        if not directory.is_dir():
+            continue
+        for path in sorted(
+            directory.rglob("*"), key=lambda candidate: str(candidate).casefold()
+        ):
+            if not path.is_file() or any(
+                part.startswith(".") for part in path.relative_to(directory).parts
+            ):
+                continue
+            relative_path = path.relative_to(root).as_posix()
+            entries.append({"path": relative_path, "role": "auto", "action": "auto"})
+    return {"sources": entries}
 
 
 @contextmanager
@@ -605,7 +631,15 @@ def _ocr_pdf(source: Path, destination: Path, language: str) -> None:
         raise PreparationError("ocrmypdf or pdfocr is required for scanned PDFs")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if Path(executable).name.casefold() == "ocrmypdf":
-        command = [executable, "--skip-text", "--deskew", "--language", language, str(source), str(destination)]
+        command = [
+            executable,
+            "--force-ocr",
+            "--deskew",
+            "--language",
+            language,
+            str(source),
+            str(destination),
+        ]
     else:
         command = [executable, str(source), str(destination)]
     _run_tool(command, 1800, "PDF OCR")
