@@ -256,14 +256,15 @@ artifacts and remote matches.
 Once a state file exists, every real transcription performs an incremental
 preflight. A new, changed, removed, or previously incomplete source blocks the
 transcription until the Agent audits and applies a refreshed sync manifest.
-Normal source synchronization never deletes or replaces a same-title/different-hash
-source automatically; it reports that source as `changed` for an explicit Agent
-decision. During a real transcription, however, a NotebookLM source that is
-proven non-queryable is eligible for the bounded recovery path: the engine first
-requires one unique local uploadable match, deletes only that exact remote UUID,
-waits for it to disappear, uploads the local file, and rebuilds the phase scopes
-before retrying. If NotebookLM rotated the UUID between audit and recovery, one
-unique canonical title/stem match in the live inventory may be reconciled; an
+When a prepared `convert` or `ocr` artifact has exactly one same-title remote
+source with a conflicting known hash, apply deletes only that exact remote UUID,
+waits for it to disappear, uploads the verified artifact, and records the old/new
+IDs. Other same-title conflicts remain `changed` for an explicit Agent decision;
+the engine never creates a duplicate as a shortcut. During a real transcription,
+a NotebookLM source that is proven non-queryable is also eligible for the bounded
+recovery path: the engine requires one unique local uploadable match, replaces the
+exact remote UUID, and rebuilds the phase scopes before retrying. If NotebookLM
+rotated the UUID, one unique canonical title/stem match may be reconciled; an
 ambiguous or local-missing match remains blocked without deletion.
 
 The Agent owns the judgment call; the engine owns the repeatable file work. Before
@@ -271,6 +272,11 @@ Phase 0 it writes a temporary manifest describing which references are relevant,
 whether an unspoken detail may be added, and what preparation is allowed. The
 read-only audit prints the plan but does not create files. A real run executes the
 plan only after the audit passes.
+
+If Phase 0 is invoked without a preparation manifest, the engine creates an
+internal inventory-wide `auto` plan for deterministic conversion and OCR. This
+fallback does not classify exam provenance or select lecture authorities; those
+decisions still require the Agent-reviewed manifest.
 
 Original files are never overwritten. Derived files go under the module's
 `.transcriber-cache/` in `converted/`, `ocr/`, `compressed/`, or `chunks/`; the
@@ -443,7 +449,9 @@ The Agent creates a temporary JSON file, for example:
 
 NotebookLM's upload-safe document set is PDF, PPTX, DOCX, and supported audio;
 plain TXT/Markdown, legacy slides, scanned PDFs, and unsupported media are
-prepared into a safe derived artifact before upload. `assessment_sources` is the source of truth for exam provenance. A `past_exam`
+prepared into a safe derived artifact before upload. Scanned PDFs use
+`ocrmypdf --force-ocr --deskew --language eng+ara` when the OCRmyPDF backend is present.
+`assessment_sources` is the source of truth for exam provenance. A `past_exam`
 entry must declare either `year` or `years`; `years` supports one collection file
 containing multiple verified exams. `question_bank` entries never receive a
 Past Exams year automatically, and `year` plus `years` must agree when both are

@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -59,6 +59,8 @@ class NotebookSourceStatus:
     remote_source_id: str = ""
     remote_title: str = ""
     error: str = ""
+    replaced_source_id: str = ""
+    replaced_source_title: str = ""
 
 
 @dataclass
@@ -341,6 +343,9 @@ def _notebook_status(request: NotebookSyncRequest) -> tuple[NotebookSourceStatus
             "ambiguous",
             error="More than one remote source is available for use_remote",
         ), False
+    replacement = _replace_changed_remote(request, ready_same_name)
+    if replacement:
+        return replacement
     if ready_same_name and source.prepared_sha256 and any(remote.content_hash for remote in ready_same_name):
         return NotebookSourceStatus(notebook.notebook_uuid, notebook.name, "changed", error="Remote title matches but its content hash differs; Agent replacement decision required"), False
     processing_status = _processing_remote_status(request, same_name)
@@ -388,6 +393,47 @@ def _processing_remote_status(
         ready.source_id,
         ready.title,
     ), False
+
+
+def _replace_changed_remote(
+    request: NotebookSyncRequest,
+    ready_same_name: list[Any],
+) -> tuple[NotebookSourceStatus, bool] | None:
+    if (
+        not request.execute
+        or request.source.preparation_action not in {"convert", "ocr"}
+    ):
+        return None
+    conflicts = [
+        remote
+        for remote in ready_same_name
+        if remote.content_hash
+        and request.source.prepared_sha256
+        and not request.engine._remote_hash_matches(request.source, remote)
+    ]
+    if len(conflicts) != 1:
+        return None
+    remote = conflicts[0]
+    try:
+        request.engine._delete_remote_source(
+            request.config, request.notebook, remote.source_id
+        )
+        request.engine._wait_for_remote_source_absent(
+            request.config, request.notebook, remote.source_id
+        )
+    except request.engine.TranscriberError as error:
+        return NotebookSourceStatus(
+            request.notebook.notebook_uuid,
+            request.notebook.name,
+            "failed",
+            error=f"Could not replace '{remote.title}': {error}",
+        ), False
+    status, uploaded = _new_remote_status(request)
+    return replace(
+        status,
+        replaced_source_id=remote.source_id,
+        replaced_source_title=remote.title,
+    ), uploaded
 
 
 def _new_remote_status(request: NotebookSyncRequest) -> tuple[NotebookSourceStatus, bool]:
@@ -641,7 +687,15 @@ def render_source_sync_report(report: SourceSyncReport) -> str:
     for source in report.sources:
         lines.append(f"[{source.status.upper()}] {source.path}: {source.action} -> {source.upload_extension or 'n/a'}")
         for notebook in source.notebooks:
-            lines.append(f"  - {notebook.notebook_name}: {notebook.status}{f' ({notebook.error})' if notebook.error else ''}")
+            replacement = (
+                f" replaced {notebook.replaced_source_id}"
+                if notebook.replaced_source_id
+                else ""
+            )
+            lines.append(
+                f"  - {notebook.notebook_name}: {notebook.status}{replacement}"
+                f"{f' ({notebook.error})' if notebook.error else ''}"
+            )
     lines.extend(f"[BLOCKING] {error}" for error in report.errors)
     lines.append("=== End Module Source Sync ===\n")
     return "\n".join(lines)
