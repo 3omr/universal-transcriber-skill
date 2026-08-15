@@ -278,18 +278,23 @@ For MCQs and Written Questions, perform a question-by-question editorial review:
    markers. Preserve the source wording and meaning; this is normalization, not
    paraphrasing. If a word cannot be restored from the source or page image with
    confidence, mark `NEEDS_OCR_REVIEW` and stop before finalization.
-2. Put exactly one option on each line in the observed order. Sourced items use
-   `Question (verbatim)` and `Options (verbatim)` after OCR normalization. IMP
-   items use `Question` and `Options`; their content is newly generated and must
-   never be called verbatim.
-3. Check that `Correct Answer` points to an existing option and that the clinical
+2. Put exactly one option on each line in the observed order (`a.`, `b.`, `c.`, `d.`).
+   Items use clean field labels: `**Question:**`, `**Options:**`, `**Correct Answer:**`,
+   and `**Clinical Explanation:**`.
+3. For Written Questions, provide a concise, source-grounded English-only `**Model Answer:**`
+   using structured sub-bullets for enumerations/lists, followed by an Egyptian Arabic
+   `**Clinical Explanation:**` explaining clinical concepts and doctor emphasis.
+4. For Clinical Cases, format each case with a clean `### Clinical Case N` heading with
+   evidence-backed badge(s), `**Scenario:**`, numbered `**Questions:**`, concise English-only
+   `**Model Answer:**`, and Egyptian Arabic `**Clinical Explanation:**`.
+5. Check that `Correct Answer` points to an existing option and that the clinical
    explanation agrees with it. Resolve contradictions against the source or mark
    `UNRESOLVED_CONFLICT`; never repair a medical fact by guessing.
-4. Compare every IMP stem with the agent-supplied exam-style profile. Match the
+6. Compare every IMP stem with the agent-supplied exam-style profile. Match the
    prior exams' short command pattern, punctuation, option labels, option length,
    and distractor shape. Keep direct exam questions direct; do not turn them into
    clinical vignettes unless the sampled exams use that form.
-5. Remove repeated questions and hide `Source:` lines, filenames, extensions, and
+7. Remove repeated questions and hide `Source:` lines, filenames, extensions, and
    source IDs from the student-facing document while retaining supported year and
    badge evidence.
 
@@ -302,7 +307,7 @@ merged block keeps every year in ascending order and one canonical `Source:` lin
 per supporting exam. Different negation, requested counts, options, command verbs,
 or medical meaning remain separate.
 
-Keep shortening limited to `Clinical Explanation`, `Model Answer (Short)`, and
+Keep shortening limited to `Clinical Explanation`, `Model Answer`, and
 clinical-case answers. Never invent a year, Past Exam provenance, or IMP claim;
 if evidence conflicts, stop and report it instead of guessing. The engine blocks
 unresolved review markers, malformed option lists, obvious OCR spacing, wrong
@@ -436,9 +441,11 @@ short model answers, and case answers may be concise.
 ## Output contract
 
 Accept only the five required sections in order. IMP Points must contain its five
-exact subsections; written answers stay concise; every clinical scenario stays
-inside a `TIP` callout. Allow only the canonical bold badges implemented by the
-engine, including `**[IMP]**`, `**[Past Exams - YYYY, YYYY]**`, `**[Question Bank]**`,
-and `**[Past Exams (YYYY, YYYY) / IMP]**`. Sourced MCQs use `Question (verbatim)` and
-`Options (verbatim)` after OCR normalization; IMP MCQs use `Question` and
-`Options`.
+exact subsections; written answers stay concise in English with structured sub-bullets and separate
+Egyptian Arabic clinical explanation; clinical cases use standard `### Clinical Case N` headings with
+evidence-backed badges, concise English model answers, and Egyptian Arabic clinical reasoning.
+Allow only the canonical bold badges implemented by the engine, including `**[IMP]**`,
+`**[Past Exams - YYYY, YYYY]**`, `**[Question Bank]**`, and `**[Past Exams (YYYY, YYYY) / IMP]**`.
+MCQs use clean `**Question:**`, `**Options:**` (with separate lines per option `a.`, `b.`, `c.`, `d.`),
+`**Correct Answer:**`, and `**Clinical Explanation:**`. Written questions use `**Question:**`,
+`**Model Answer:**`, and `**Clinical Explanation:**`.

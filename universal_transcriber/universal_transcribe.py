@@ -2722,7 +2722,10 @@ def _project_heading_pattern(phase_name: str) -> re.Pattern[str] | None:
     if phase_name == "Written Questions":
         return re.compile(r"^### Question\s+\d+", flags=re.MULTILINE)
     if phase_name == "Clinical Cases":
-        return re.compile(r"(\*\*🩺 Clinical Case )\d+(:\*\*)")
+        return re.compile(
+            r"(?:^### (?:Clinical )?Case\s+\d+|(\*\*🩺 Clinical Case )\d+(:\*\*))",
+            flags=re.MULTILINE,
+        )
     return None
 
 
@@ -2736,13 +2739,18 @@ def _renumber_project_answer(
 
     def replace(match: re.Match[str]) -> str:
         nonlocal number
-        replacement = (
-            f"### MCQ {number}"
-            if phase_name == "MCQs"
-            else f"### Question {number}"
-            if phase_name == "Written Questions"
-            else f"**🩺 Clinical Case {number}:**"
-        )
+        if phase_name == "MCQs":
+            replacement = f"### MCQ {number}"
+        elif phase_name == "Written Questions":
+            replacement = f"### Question {number}"
+        elif phase_name == "Clinical Cases":
+            matched_str = match.group(0)
+            if matched_str.startswith("###"):
+                replacement = f"### Clinical Case {number}"
+            else:
+                replacement = f"**🩺 Clinical Case {number}:**"
+        else:
+            replacement = match.group(0)
         number += 1
         return replacement
 
@@ -3749,14 +3757,14 @@ the Past Exams badge when a question-bank copy also supports it. Do not merge
 questions when the options, negation, requested count, or clinical meaning differ.
 
 Before returning the section, perform an editorial pass: put one option on each
-line in the learned label order, make Correct Answer start with an existing
+line in the learned label order (a., b., c., d.), make Correct Answer start with an existing
 option label, remove NotebookLM citation markers such as [34،86], and stop on
 any word whose OCR cannot be restored confidently.
 
 For every item use this exact field contract with ### MCQ N and its badge(s):
-**Question (verbatim):**, **Options (verbatim):**, **Source:**,
-**Correct Answer:**, and **Clinical Explanation (Egyptian Arabic):**. If no
-matching verbatim MCQ exists, return exactly {NO_MCQS}. Return section body only;
+**Question:**, **Options:** (with each option on a new line: a. ..., b. ..., c. ..., d. ...),
+**Source:** (if past exam/question bank), **Correct Answer:**, and **Clinical Explanation:**.
+If no matching MCQ exists, return exactly {NO_MCQS}. Return section body only;
 never use # or ## headings."""
 
 
@@ -3777,8 +3785,8 @@ matter, wording, answer, or provenance. Keep stems short and direct; do not make
 a clinical vignette unless the profile shows that pattern.
 
 For every item use ### MCQ N **[IMP]**, then **Question:**, **Options:**,
-**Correct Answer:**, and **Clinical Explanation (Egyptian Arabic):**. Put one
-option on each line, ensure the correct answer starts with an existing option
+**Correct Answer:**, and **Clinical Explanation:**. Put one
+option on each line (a., b., c., d.), ensure the correct answer starts with an existing option
 label, and use no Source field or verbatim label. Return section body only;
 never use # or ## headings. If no emphasized point supports an MCQ, return
 exactly {NO_MCQS}."""
@@ -3812,12 +3820,14 @@ and source line. Keep questions with different command verbs, requested counts,
 scope, or medical meaning separate; send uncertain semantic matches for Agent
 review instead of merging them.
 
-For every item use ### Question N with badge(s), then **Question (verbatim):**,
-**Source:**, and **Model Answer (Short):**. Answers must be concise and direct:
-short bullets for lists, one short mechanism sentence for Give Reason, and a
-compact Markdown table for Compare. Run an editorial OCR pass before returning:
-repair split letters and joined words only when the source supports the repair,
-remove NotebookLM citation markers, and flag unresolved wording instead of
+For every item use ### Question N with badge(s), then **Question:**,
+**Source:** (if past exam/question bank), **Model Answer:**, and **Clinical Explanation:**.
+Model Answer must be in English only and strictly concise short answers grounded in the sources:
+use structured sub-bullets (each enumerated item on its own line) for lists, one short mechanism
+sentence for Give Reason, and a compact Markdown table for Compare.
+Clinical Explanation must be in Egyptian Arabic explaining key concepts, clinical rationale, and doctor emphasis.
+Run an editorial OCR pass before returning: repair split letters and joined words only when the source
+supports the repair, remove NotebookLM citation markers, and flag unresolved wording instead of
 guessing. No introduction, conclusion, or filler. If no grounded written
 question exists, return exactly {NO_WRITTEN}. Return section body only; never use
 # or ## headings."""
@@ -3839,35 +3849,53 @@ answer shape. Do not replace a direct complete, enumerate, causes of, mechanism
 of, treatment of, or give reason form with a long academic essay prompt unless
 the profile shows that pattern.
 
-For every item use ### Question N **[IMP]**, then **Question:** and
-**Model Answer (Short):**. Use no Source field or verbatim label. Answers must be
-concise: short bullets for lists, one short mechanism sentence for Give Reason,
-and a compact Markdown table for Compare. Return section body only; never use #
-or ## headings. If no emphasized point supports a written question, return
+For every item use ### Question N **[IMP]**, then **Question:**,
+**Model Answer:**, and **Clinical Explanation:**. Use no Source field or verbatim label.
+Answers must be concise and in English only: structured sub-bullets for lists (each enumerated item on its own line),
+one short mechanism sentence for Give Reason, and a compact Markdown table for Compare.
+Clinical Explanation must be in Egyptian Arabic explaining the clinical reasoning and exam pearls.
+Return section body only; never use # or ## headings. If no emphasized point supports a written question, return
 exactly {NO_WRITTEN}."""
 
 
-def build_case_prompt(title: str, context: str, badge_instructions: str) -> str:
+def build_case_prompt(
+    title: str,
+    context: str,
+    badge_instructions: str,
+    exam_style_profile: dict[str, Any] | None = None,
+) -> str:
+    context = _compact_assessment_context(context)
+    style_context = render_exam_style_profile(
+        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
+    )
     return f"""Create only the body of the 🩺 Clinical Cases section for '{title}'.
 
 {context}
-Create 2-3 clinically relevant cases within the recording's taught scope. Put
-every complete case inside its own > [!TIP] block. Every line belonging to the
-case must start with >. Each block must contain > **🩺 Clinical Case N:** with
-evidence-backed badge(s), > **Scenario:**, > **Questions:**, and
-> **Model Answer (Short):**. Ask diagnostic, investigation, findings, and/or
-management questions as appropriate. Each Model Answer must contain only 3-6
-one-sentence bullets and the entire answer after its field label must stay under
-900 characters. Use this exact quoted structure for every case:
-> [!TIP]
-> **🩺 Clinical Case N:** **[IMP]**
-> **Scenario:** concise scenario
-> **Questions:** concise numbered questions
-> **Model Answer (Short):**
-> - concise answer point
+
+{style_context}
+
+Create 2-3 clinically relevant cases within the recording's taught scope.
+Study past exam patterns and observed question structures from the course to match:
+- The typical case scenario style and length
+- The exact question count and breakdown per case (e.g. 1. Diagnosis/Significance, 2. Mechanism/Investigations, 3. Management/Autopsy findings)
+- Clear, concise questions without filler
+
+For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
+### Clinical Case N with evidence-backed badge(s)
+**Scenario:** concise clinical scenario
+**Questions:**
+1. concise numbered question 1
+2. concise numbered question 2
+3. concise numbered question 3
+**Model Answer:**
+1. **Category/Heading:**
+   - Concise English short answer grounded in source files/slides
+2. **Category/Heading:**
+   - Concise English short answer
+**Clinical Explanation:** Egyptian Arabic explanation covering clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
 
 A case carrying a Past Exams or Question Bank badge must also contain
-> **Source:** with the exact source name and verified year.
+**Source:** with the exact source name and verified year.
 
 {badge_instructions}
 Use a past-exam or question-bank badge only for a verbatim or traceably adapted
@@ -3985,6 +4013,15 @@ def validate_imp(query_result: QueryResult) -> list[str]:
 
 
 def _section_blocks(answer: str, heading_prefix: str) -> list[str]:
+    if heading_prefix in ("Clinical Case", "Case"):
+        pattern = r"(?ms)^(?:### (?:Clinical )?Case\s+\d+|>\s*\*\*🩺 Clinical Case \d+:?\*\*).*?(?=(?:^### (?:Clinical )?Case\s+\d+|^>\s*\*\*🩺 Clinical Case \d+:?\*\*|\Z))"
+        blocks = re.findall(pattern, answer)
+        if blocks:
+            return blocks
+        if "> [!TIP]" in answer:
+            return [b.strip() for b in answer.split("> [!TIP]") if b.strip()]
+        pattern = rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)"
+        return re.findall(pattern, answer)
     pattern = rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)"
     return re.findall(pattern, answer)
 
@@ -4301,19 +4338,48 @@ def _question_provenance_errors(
 
 def _field_content(block: str, field_name: str) -> str:
     pattern = (
-        rf"(?ms)^\*\*{re.escape(field_name)}:\*\*\s*"
-        rf"(.*?)(?=^\*\*[^*\n]+:\*\*|\Z)"
+        rf"(?ms)^\s*(?:>\s*)?\*\*{re.escape(field_name)}:\*\*\s*"
+        rf"(.*?)(?=^\s*(?:>\s*)?\*\*[^*\n]+:\*\*|\Z)"
     )
     match = re.search(pattern, block)
     return match.group(1).strip() if match else ""
 
 
 def _question_content(block: str) -> str:
-    for field_name in ("Question (verbatim)", "Question"):
+    for field_name in ("Question", "Question (verbatim)"):
         content = _field_content(block, field_name)
         if content:
             return content
     return ""
+
+
+def _options_content(block: str) -> str:
+    for field_name in ("Options", "Options (verbatim)"):
+        content = _field_content(block, field_name)
+        if content:
+            return content
+    return ""
+
+
+def _model_answer_content(block: str) -> str:
+    for field_name in ("Model Answer", "Model Answer (Short)"):
+        content = _field_content(block, field_name)
+        if content:
+            return content
+    return ""
+
+
+def _explanation_content(block: str) -> str:
+    for field_name in (
+        "Clinical Explanation",
+        "Clinical Explanation (Egyptian Arabic)",
+        "Explanation",
+    ):
+        content = _field_content(block, field_name)
+        if content:
+            return content
+    return ""
+
 
 
 def _question_fingerprint_text(value: str) -> str:
@@ -4405,6 +4471,72 @@ def _merged_badges(
     return badges
 
 
+def _normalize_mcq_block(block: str) -> str:
+    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", block)
+    text = re.sub(r"\*\*Options\s*(?:\(verbatim\))?:\*\*", "**Options:**", text)
+    text = re.sub(
+        r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
+        "**Clinical Explanation:**",
+        text,
+    )
+    options_match = re.search(
+        r"(?ms)^\*\*Options:\*\*[ \t]*(.*?)(?=^\*\*[^*\n]+:\*\*|\Z)", text
+    )
+    if options_match:
+        raw_options = options_match.group(1).strip()
+        entries = _option_entries(raw_options)
+        if entries:
+            formatted_options = "\n".join(f"{k}. {v}" for k, v in entries.items())
+            start, end = options_match.span(0)
+            text = text[:start] + "**Options:**\n" + formatted_options + "\n" + text[end:]
+    return text.strip()
+
+
+def _normalize_written_block(block: str) -> str:
+    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", block)
+    text = re.sub(r"\*\*Model Answer\s*(?:\(Short\))?:\*\*", "**Model Answer:**", text)
+    text = re.sub(
+        r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
+        "**Clinical Explanation:**",
+        text,
+    )
+    return text.strip()
+
+
+def _normalize_case_block(block: str) -> str:
+    lines = block.splitlines()
+    cleaned_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in ("> [!TIP]", "[!TIP]"):
+            continue
+        if stripped.startswith("> "):
+            stripped = stripped[2:]
+        elif stripped.startswith(">"):
+            stripped = stripped[1:]
+        cleaned_lines.append(stripped)
+    text = "\n".join(cleaned_lines).strip()
+    text = re.sub(
+        r"^\*\*🩺 Clinical Case\s+(\d+):\*\*(.*)$",
+        r"### Clinical Case \1\2",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        r"^### Case\s+(\d+)(.*)$",
+        r"### Clinical Case \1\2",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(r"\*\*Model Answer\s*(?:\(Short\))?:\*\*", "**Model Answer:**", text)
+    text = re.sub(
+        r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
+        "**Clinical Explanation:**",
+        text,
+    )
+    return text.strip()
+
+
 def _merge_question_blocks(
     blocks: list[str],
     heading_prefix: str,
@@ -4432,13 +4564,25 @@ def _merge_question_blocks(
         base,
     ).strip()
     source_lines = "\n".join(f"**Source:** {source}" for source in source_names)
-    anchor = "**Correct Answer:**" if heading_prefix == "MCQ" else "**Model Answer (Short):**"
+    anchors = ("**Correct Answer:**", "**Model Answer:**", "**Model Answer (Short):**")
     if source_lines:
-        if anchor in base:
-            base = base.replace(anchor, f"{source_lines}\n{anchor}", 1)
+        found_anchor = None
+        for a in anchors:
+            if a in base:
+                found_anchor = a
+                break
+        if found_anchor:
+            base = base.replace(found_anchor, f"{source_lines}\n{found_anchor}", 1)
         else:
             base = f"{base}\n{source_lines}"
-    return f"{heading}{''.join(f' {badge}' for badge in badges)}\n\n{base.strip()}"
+    merged_block = f"{heading}{''.join(f' {badge}' for badge in badges)}\n\n{base.strip()}"
+    if heading_prefix == "MCQ":
+        return _normalize_mcq_block(merged_block)
+    elif heading_prefix == "Question":
+        return _normalize_written_block(merged_block)
+    elif heading_prefix in ("Clinical Case", "Case"):
+        return _normalize_case_block(merged_block)
+    return merged_block
 
 
 def deduplicate_question_section(
@@ -4449,30 +4593,46 @@ def deduplicate_question_section(
 ) -> str:
     """Merge only exact/OCR-safe duplicate question blocks."""
     blocks = _section_blocks(answer, heading_prefix)
-    if len(blocks) < 2:
+    if not blocks:
         return answer
+    normalized_blocks = [
+        _normalize_mcq_block(block)
+        if heading_prefix == "MCQ"
+        else _normalize_written_block(block)
+        if heading_prefix == "Question"
+        else _normalize_case_block(block)
+        for block in blocks
+    ]
     groups: dict[tuple[str, bool], list[str]] = {}
     order: list[tuple[str, bool]] = []
-    for block in blocks:
+    for block in normalized_blocks:
         group_key = _question_group_key(block, heading_prefix)
         if group_key not in groups:
             order.append(group_key)
             groups[group_key] = []
         groups[group_key].append(block)
-    if all(len(groups[group_key]) == 1 for group_key in order):
-        return answer
     merged = [
         _merge_question_blocks(
             groups[group_key], heading_prefix, year_map or {}, evidence_catalog
         )
         for group_key in order
     ]
-    matches = list(
-        re.finditer(
-            rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)",
-            answer,
+    if heading_prefix in ("Clinical Case", "Case"):
+        matches = list(
+            re.finditer(
+                r"(?ms)^(?:### (?:Clinical )?Case\s+\d+|> \[!TIP\]).*?(?=(?:^### (?:Clinical )?Case\s+\d+|^> \[!TIP\]|^## |\Z))",
+                answer,
+            )
         )
-    )
+    else:
+        matches = list(
+            re.finditer(
+                rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)",
+                answer,
+            )
+        )
+    if not matches:
+        return answer
     prefix = answer[: matches[0].start()]
     suffix = answer[matches[-1].end() :]
     return prefix + "\n\n".join(merged) + suffix
@@ -4491,7 +4651,12 @@ def renumber_question_section(answer: str, heading_prefix: str) -> str:
             line,
         )
 
-    return re.sub(rf"^### {re.escape(heading_prefix)}\s+\d+[^\n]*$", replace, answer, flags=re.MULTILINE)
+    return re.sub(
+        rf"^### {re.escape(heading_prefix)}\s+\d+[^\n]*$",
+        replace,
+        answer,
+        flags=re.MULTILINE,
+    )
 
 
 def normalize_question_result(
@@ -4586,14 +4751,12 @@ def _option_shape_errors(
     block: str, block_number: int, profile: dict[str, Any]
 ) -> list[str]:
     is_imp = "**[IMP]**" in block
-    expected_field = "Options" if is_imp else "Options (verbatim)"
-    wrong_field = "Options (verbatim)" if is_imp else "Options"
     errors: list[str] = []
-    has_expected_field = f"**{expected_field}:**" in block
-    has_wrong_field = f"**{wrong_field}:**" in block
-    if has_wrong_field and not has_expected_field:
+    if is_imp and "**Options (verbatim):**" in block:
         errors.append(f"MCQ {block_number} uses the wrong options field for its badge")
-    options = _field_content(block, expected_field)
+    options = _options_content(block)
+    if not options:
+        return [f"MCQ {block_number} [missing_field]: missing **Options:**"]
     keys = _option_keys(options)
     expected_keys = _expected_option_keys(profile)
     if keys != list(expected_keys):
@@ -4661,8 +4824,7 @@ def _mcq_editorial_errors(
             continue
         errors += _ocr_quality_errors(question, f"MCQ {block_number} question")
         errors += _option_shape_errors(block, block_number, profile)
-        options = _field_content(block, "Options (verbatim)")
-        options = options or _field_content(block, "Options")
+        options = _options_content(block)
         errors += _correct_answer_errors(block, block_number, options)
         errors += _ocr_quality_errors(
             _field_content(block, "Correct Answer"),
@@ -4699,18 +4861,18 @@ def _mcq_field_errors(answer: str) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "MCQ"):
         number = _question_number(block, "MCQ")
-        question_field = (
-            "**Question:**" if "**[IMP]**" in block else "**Question (verbatim):**"
-        )
-        option_field = "**Options:**" if "**[IMP]**" in block else "**Options (verbatim):**"
-        for field_name in (
-            question_field,
-            option_field,
-            "**Correct Answer:**",
-            "**Clinical Explanation (Egyptian Arabic):**",
-        ):
-            if field_name not in block:
-                errors.append(f"MCQ {number} [missing_field]: missing {field_name}")
+        has_question = bool(_question_content(block))
+        has_options = bool(_options_content(block))
+        has_correct = "**Correct Answer:**" in block
+        has_explanation = bool(_explanation_content(block))
+        if not has_question:
+            errors.append(f"MCQ {number} [missing_field]: missing **Question:**")
+        if not has_options:
+            errors.append(f"MCQ {number} [missing_field]: missing **Options:**")
+        if not has_correct:
+            errors.append(f"MCQ {number} [missing_field]: missing **Correct Answer:**")
+        if not has_explanation:
+            errors.append(f"MCQ {number} [missing_field]: missing **Clinical Explanation:**")
         if "**[IMP]**" not in block and "**Source:**" not in block:
             errors.append(f"MCQ {number} [missing_source]: missing **Source:**")
     return errors
@@ -4720,14 +4882,16 @@ def _written_field_errors(answer: str) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "Question"):
         number = _question_number(block, "Question")
-        question_field = (
-            "**Question:**" if "**[IMP]**" in block else "**Question (verbatim):**"
-        )
-        for field_name in (question_field, "**Model Answer (Short):**"):
-            if field_name not in block:
-                errors.append(
-                    f"Question {number} [missing_field]: missing {field_name}"
-                )
+        has_question = bool(_question_content(block))
+        has_model_answer = bool(_model_answer_content(block))
+        if not has_question:
+            errors.append(
+                f"Question {number} [missing_field]: missing **Question:**"
+            )
+        if not has_model_answer:
+            errors.append(
+                f"Question {number} [missing_field]: missing **Model Answer:**"
+            )
         if "**[IMP]**" not in block and "**Source:**" not in block:
             errors.append(f"Question {number} [missing_source]: missing **Source:**")
     return errors
@@ -4793,7 +4957,7 @@ def _long_model_answer_errors(answer: str, maximum_characters: int) -> list[str]
     errors: list[str] = []
     for block in _section_blocks(answer, "Question"):
         number = _question_number(block, "Question")
-        model_answer = block.partition("**Model Answer (Short):**")[2]
+        model_answer = _model_answer_content(block)
         if len(model_answer.strip()) > maximum_characters:
             errors.append(
                 f"Question {number} [model_answer_too_long]: model answer is not concise"
@@ -4864,6 +5028,17 @@ def _has_imp_badge(case_block: str) -> bool:
     )
 
 
+def _case_blocks(answer: str) -> list[str]:
+    standard_blocks = _section_blocks(answer, "Clinical Case")
+    if not standard_blocks:
+        standard_blocks = _section_blocks(answer, "Case")
+    if standard_blocks:
+        return standard_blocks
+    if "> [!TIP]" in answer:
+        return [b.strip() for b in answer.split("> [!TIP]") if b.strip()]
+    return []
+
+
 def _case_block_evidence_errors(
     case_block: str, query_result: QueryResult, evidence: CaseEvidence
 ) -> list[str]:
@@ -4886,7 +5061,7 @@ def _case_block_evidence_errors(
 def _case_source_errors(
     query_result: QueryResult, evidence: CaseEvidence
 ) -> list[str]:
-    case_blocks = query_result.answer.split("> [!TIP]")[1:]
+    case_blocks = _case_blocks(query_result.answer)
     errors = [
         error
         for case_block in case_blocks
@@ -4900,22 +5075,39 @@ def _case_source_errors(
 
 
 def _case_field_errors(answer: str, case_count: int) -> list[str]:
+    case_blocks = _case_blocks(answer)
     errors: list[str] = []
-    for field_name in (
-        "> **🩺 Clinical Case",
-        "> **Scenario:**",
-        "> **Questions:**",
-        "> **Model Answer (Short):**",
-    ):
-        if answer.count(field_name) < case_count:
-            errors.append(f"clinical-case response is missing {field_name}")
+    for idx, block in enumerate(case_blocks, start=1):
+        has_scenario = "**Scenario:**" in block or "> **Scenario:**" in block
+        has_questions = "**Questions:**" in block or "> **Questions:**" in block
+        has_model_answer = (
+            "**Model Answer:**" in block
+            or "**Model Answer (Short):**" in block
+            or "> **Model Answer:**" in block
+            or "> **Model Answer (Short):**" in block
+        )
+        if not has_scenario:
+            errors.append(f"clinical-case response is missing **Scenario:** in Case {idx}")
+        if not has_questions:
+            errors.append(f"clinical-case response is missing **Questions:** in Case {idx}")
+        if not has_model_answer:
+            errors.append(f"clinical-case response is missing **Model Answer:** in Case {idx}")
     return errors
 
 
 def _long_case_answer_errors(answer: str) -> list[str]:
-    for case_block in answer.split("> [!TIP]")[1:]:
-        model_answer = case_block.partition("> **Model Answer (Short):**")[2]
-        if len(model_answer.strip()) > 1_200:
+    for case_block in _case_blocks(answer):
+        model_answer = _model_answer_content(case_block)
+        if not model_answer:
+            if "**Model Answer:**" in case_block:
+                model_answer = case_block.partition("**Model Answer:**")[2]
+            elif "**Model Answer (Short):**" in case_block:
+                model_answer = case_block.partition("**Model Answer (Short):**")[2]
+            elif "> **Model Answer:**" in case_block:
+                model_answer = case_block.partition("> **Model Answer:**")[2]
+            elif "> **Model Answer (Short):**" in case_block:
+                model_answer = case_block.partition("> **Model Answer (Short):**")[2]
+        if len(model_answer.strip()) > 1_500:
             return ["one or more clinical-case answers is not concise"]
     return []
 
@@ -4925,14 +5117,15 @@ def validate_cases(
 ) -> list[str]:
     answer = query_result.answer
     errors = _body_heading_errors(answer)
-    errors += _callout_errors(answer, {"TIP"})
+    errors += _callout_errors(answer, {"TIP", "NOTE", "IMPORTANT", "WARNING", "CAUTION"})
     errors += _badge_errors(answer, set(evidence.year_map))
     errors += _case_source_errors(query_result, evidence)
-    case_count = answer.count("> [!TIP]")
+    case_blocks = _case_blocks(answer)
+    case_count = len(case_blocks)
     if case_count < 2:
-        errors.append("clinical-case response must contain at least two TIP blocks")
+        errors.append("clinical-case response must contain at least two clinical cases")
     errors += _case_field_errors(answer, case_count)
-    if _unquoted_case_line(answer):
+    if "> [!TIP]" in answer and _unquoted_case_line(answer):
         errors.append("a clinical-case line is outside its TIP quote block")
     return errors + _long_case_answer_errors(answer)
 
@@ -4988,6 +5181,16 @@ def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
             sections.cases,
         )
     ]
+    if cleaned_sections[2].strip() and cleaned_sections[2].strip() != NO_MCQS:
+        cleaned_sections[2] = deduplicate_question_section(cleaned_sections[2], "MCQ")
+    if cleaned_sections[3].strip() and cleaned_sections[3].strip() != NO_WRITTEN:
+        cleaned_sections[3] = deduplicate_question_section(cleaned_sections[3], "Question")
+    if cleaned_sections[4].strip():
+        cleaned_cases = []
+        for case_block in _case_blocks(cleaned_sections[4]):
+            cleaned_cases.append(_normalize_case_block(case_block))
+        if cleaned_cases:
+            cleaned_sections[4] = "\n\n".join(cleaned_cases)
     cleaned_sections[2] = _replace_empty_sentinel(
         cleaned_sections[2],
         NO_MCQS,
@@ -5045,7 +5248,7 @@ def finalize_student_document(
 ) -> str:
     """Require Agent editorial review before producing the student document."""
     reviewed = draft
-    for heading_prefix in ("MCQ", "Question"):
+    for heading_prefix in ("MCQ", "Question", "Clinical Case"):
         reviewed = deduplicate_question_section(
             reviewed, heading_prefix, {year: [] for year in verified_years}, evidence_catalog
         )
@@ -5793,6 +5996,7 @@ def _query_cases(context: PipelineContext) -> QueryResult:
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
+                context.exam_style_profile,
             ),
             phase_name="Clinical Cases",
             validator=lambda query_result: validate_cases(
