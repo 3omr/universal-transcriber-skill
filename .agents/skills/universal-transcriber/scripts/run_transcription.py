@@ -255,13 +255,16 @@ def _topic_tokens(engine: ModuleType, source_name: str) -> set[str]:
 def _matching_slides(
     engine: ModuleType, source_root: Path, recording_title: str
 ) -> Path | None:
+    lecture_dir = source_root / "Lecture"
+    if not lecture_dir.is_dir():
+        return None
     recording_tokens = _topic_tokens(engine, recording_title)
     candidates = [
-        source
-        for source in engine.scan_local_sources(str(source_root))
-        if source.relative_path.startswith(f"Lecture{os.sep}")
-        and source.role != "textbook"
-        and source.extension in {*engine.SLIDE_EXTENSIONS, ".pdf"}
+        source_file
+        for source_file in lecture_dir.iterdir()
+        if source_file.is_file()
+        and source_file.suffix.lower() in {*engine.SLIDE_EXTENSIONS, ".pdf"}
+        and "book" not in source_file.stem.lower()
     ]
     scored = [
         (len(recording_tokens & _topic_tokens(engine, source.name)), source)
@@ -269,7 +272,7 @@ def _matching_slides(
     ]
     best_score = max((score for score, _source in scored), default=0)
     matches = [source for score, source in scored if score == best_score and score > 0]
-    return Path(matches[0].path) if len(matches) == 1 else None
+    return matches[0] if len(matches) == 1 else None
 
 
 def _requested_slides(requested: str, module: ModuleConfig) -> Path:

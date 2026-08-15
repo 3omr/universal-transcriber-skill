@@ -4635,6 +4635,10 @@ def deduplicate_question_section(
         return answer
     prefix = answer[: matches[0].start()]
     suffix = answer[matches[-1].end() :]
+    if prefix and not prefix.endswith("\n\n"):
+        prefix = prefix.rstrip() + "\n\n"
+    if suffix and not suffix.startswith("\n\n"):
+        suffix = "\n\n" + suffix.lstrip()
     return prefix + "\n\n".join(merged) + suffix
 
 
