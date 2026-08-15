@@ -3877,7 +3877,8 @@ def build_case_prompt(
 Create 2-3 clinically relevant cases within the recording's taught scope.
 Study past exam patterns and observed question structures from the course to match:
 - The typical case scenario style and length
-- The exact question count and breakdown per case (e.g. 1. Diagnosis/Significance, 2. Mechanism/Investigations, 3. Management/Autopsy findings)
+- For cases sourced from past exams, reproduce all original sub-questions verbatim in their exact count, text, and sequence without omitting or shortening any sub-questions.
+- The exact question breakdown per case (e.g. 1. Diagnosis/Significance, 2. Mechanism/Investigations, 3. Management/Autopsy findings)
 - Clear, concise questions without filler
 
 For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
@@ -4486,9 +4487,9 @@ def _normalize_mcq_block(block: str) -> str:
         raw_options = options_match.group(1).strip()
         entries = _option_entries(raw_options)
         if entries:
-            formatted_options = "\n".join(f"{k}. {v}" for k, v in entries.items())
+            formatted_options = "\n".join(f"- **{k}.** {v}" for k, v in entries.items())
             start, end = options_match.span(0)
-            text = text[:start] + "**Options:**\n" + formatted_options + "\n" + text[end:]
+            text = text[:start] + "**Options:**\n" + formatted_options + "\n\n" + text[end:].lstrip()
     return text.strip()
 
 
@@ -4591,7 +4592,7 @@ def deduplicate_question_section(
     year_map: dict[int, list[str]] | None = None,
     evidence_catalog: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Merge only exact/OCR-safe duplicate question blocks."""
+    """Merge exact, semantic, and OCR duplicate question blocks automatically."""
     blocks = _section_blocks(answer, heading_prefix)
     if not blocks:
         return answer
@@ -4611,6 +4612,7 @@ def deduplicate_question_section(
             order.append(group_key)
             groups[group_key] = []
         groups[group_key].append(block)
+
     merged = [
         _merge_question_blocks(
             groups[group_key], heading_prefix, year_map or {}, evidence_catalog
@@ -4722,7 +4724,7 @@ def _option_keys(options: str) -> list[str]:
 
 def _option_entries(options: str) -> dict[str, str]:
     markers = list(
-        re.finditer(r"(?<![A-Za-z0-9])([a-dA-D])\s*[\.)]\s*", options)
+        re.finditer(r"(?<![A-Za-z0-9])(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*", options)
     )
     return {
         marker.group(1).casefold(): options[marker.end() : next_start].strip()
@@ -4775,7 +4777,7 @@ def _correct_answer_errors(
     block: str, block_number: int, options: str
 ) -> list[str]:
     answer = _field_content(block, "Correct Answer")
-    match = re.match(r"([a-dA-D])\s*[\.)]\s*", answer)
+    match = re.match(r"(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*", answer)
     if not match:
         return [f"MCQ {block_number} Correct Answer must start with an option label"]
     option_entries = _option_entries(options)
@@ -4957,12 +4959,15 @@ def validate_mcqs(
     return errors
 
 
-def _long_model_answer_errors(answer: str, maximum_characters: int) -> list[str]:
+def _long_model_answer_errors(answer: str, base_characters: int = 2_000) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "Question"):
         number = _question_number(block, "Question")
+        question_text = _question_content(block)
+        sub_parts = len(re.findall(r"(?:^|\n)\s*(?:\d+[\.)]|[a-e][\.)])", question_text))
+        max_chars = base_characters + (max(0, sub_parts - 1) * 1_000)
         model_answer = _model_answer_content(block)
-        if len(model_answer.strip()) > maximum_characters:
+        if len(model_answer.strip()) > max_chars:
             errors.append(
                 f"Question {number} [model_answer_too_long]: model answer is not concise"
             )
@@ -5099,8 +5104,11 @@ def _case_field_errors(answer: str, case_count: int) -> list[str]:
     return errors
 
 
-def _long_case_answer_errors(answer: str) -> list[str]:
+def _long_case_answer_errors(answer: str, base_characters: int = 2_500) -> list[str]:
     for case_block in _case_blocks(answer):
+        questions_text = _field_content(case_block, "Questions")
+        sub_parts = len(re.findall(r"(?:^|\n)\s*(?:\d+[\.)]|[a-e][\.)])", questions_text))
+        max_chars = base_characters + (max(0, sub_parts - 1) * 1_000)
         model_answer = _model_answer_content(case_block)
         if not model_answer:
             if "**Model Answer:**" in case_block:
@@ -5111,7 +5119,7 @@ def _long_case_answer_errors(answer: str) -> list[str]:
                 model_answer = case_block.partition("> **Model Answer:**")[2]
             elif "> **Model Answer (Short):**" in case_block:
                 model_answer = case_block.partition("> **Model Answer (Short):**")[2]
-        if len(model_answer.strip()) > 1_500:
+        if len(model_answer.strip()) > max_chars:
             return ["one or more clinical-case answers is not concise"]
     return []
 
@@ -6017,6 +6025,12 @@ def _query_cases(context: PipelineContext) -> QueryResult:
             notebook_ids=tuple(
                 notebook.notebook_uuid
                 for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
+            normalizer=lambda result: normalize_question_result(
+                result,
+                "Clinical Case",
+                context.report.year_map,
+                context.evidence_catalog,
             ),
         )
     )

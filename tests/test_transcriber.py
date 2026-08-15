@@ -2344,7 +2344,7 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
         normalized = engine._normalize_mcq_block(answer)
-        self.assertIn("**Options:**\na. Reflex cardiac inhibition\nb. Asphyxia\nc. Cerebral anemia\nd. Tearing of the pons", normalized)
+        self.assertIn("**Options:**\n- **a.** Reflex cardiac inhibition\n- **b.** Asphyxia\n- **c.** Cerebral anemia\n- **d.** Tearing of the pons", normalized)
         self.assertIn("**Question:**", normalized)
         self.assertIn("**Clinical Explanation:**", normalized)
 

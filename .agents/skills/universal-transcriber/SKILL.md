@@ -278,15 +278,18 @@ For MCQs and Written Questions, perform a question-by-question editorial review:
    markers. Preserve the source wording and meaning; this is normalization, not
    paraphrasing. If a word cannot be restored from the source or page image with
    confidence, mark `NEEDS_OCR_REVIEW` and stop before finalization.
-2. Put exactly one option on each line in the observed order (`a.`, `b.`, `c.`, `d.`).
+2. Format MCQ options as an unordered Markdown list with bold labels:
+   `- **a.** Option text`, `- **b.** Option text`, `- **c.** Option text`, `- **d.** Option text`.
    Items use clean field labels: `**Question:**`, `**Options:**`, `**Correct Answer:**`,
-   and `**Clinical Explanation:**`.
+   and `**Clinical Explanation:**`. Always leave an empty line (`\n\n`) before `**Correct Answer:**`.
 3. For Written Questions, provide a concise, source-grounded English-only `**Model Answer:**`
    using structured sub-bullets for enumerations/lists, followed by an Egyptian Arabic
    `**Clinical Explanation:**` explaining clinical concepts and doctor emphasis.
 4. For Clinical Cases, format each case with a clean `### Clinical Case N` heading with
    evidence-backed badge(s), `**Scenario:**`, numbered `**Questions:**`, concise English-only
-   `**Model Answer:**`, and Egyptian Arabic `**Clinical Explanation:**`.
+   `**Model Answer:**`, and Egyptian Arabic `**Clinical Explanation:**`. For cases originating
+   from past exams, reproduce all original sub-questions verbatim in their exact count, text,
+   and sequence without omitting or shortening any sub-questions.
 5. Check that `Correct Answer` points to an existing option and that the clinical
    explanation agrees with it. Resolve contradictions against the source or mark
    `UNRESOLVED_CONFLICT`; never repair a medical fact by guessing.
