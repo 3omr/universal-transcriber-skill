@@ -711,7 +711,7 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
     }
 
     payload = {
-        "title": query_clean,
+        "title": query_stem,
         "recording_sources": matched_audio,
         "slides": {
             "path": slide_path,
@@ -720,7 +720,7 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
         "assessment_sources": assessment_sources,
         "exam_style_profile": exam_style_profile,
     }
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", query_clean).strip("-").lower() or "lecture"
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", query_stem).strip("-").lower() or "lecture"
     manifest_path = Path(tempfile.gettempdir()) / f"{slug}-auto-manifest.json"
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest_path

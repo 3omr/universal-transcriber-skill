@@ -6456,7 +6456,11 @@ def _phase_validation_contract(
 def _recovery_response_path(request: RunRequest, run_dir: Path) -> Path:
     if not request.recovery_response:
         raise CheckpointError("No Agent recovery response was supplied")
-    response_path = Path(request.recovery_response).expanduser().resolve()
+    raw_path = Path(request.recovery_response).expanduser()
+    if raw_path.is_absolute():
+        response_path = raw_path.resolve()
+    else:
+        response_path = (run_dir / raw_path).resolve()
     try:
         response_path.relative_to(run_dir.resolve())
     except ValueError as error:
