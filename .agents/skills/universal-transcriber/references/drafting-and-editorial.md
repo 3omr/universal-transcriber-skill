@@ -112,15 +112,15 @@ Grounded clinical vignettes with all original exam sub-questions reproduced verb
 4. Mention two absolute contraindications in the initial management.
 
 **Model Answer:**
-1. **Diagnosis:** Corrosive ingestion (Alkali/Acid caustic burn).
+1. **Diagnosis:** Corrosive ingestion (Alkali/Acid caustic burn)
 2. **Immediate Management:**
-   - Airway assessment and maintenance (intubation/tracheostomy if severe stridor is present).
-   - IV fluid resuscitation and analgesia.
-   - Nil per os (NPO) status.
-3. **Investigation & Timing:** Early upper GI endoscopy (Esophagogastroduodenoscopy - EGD) performed within 12 to 24 hours of ingestion.
+   - Airway maintenance (intubation if stridor)
+   - IV fluids & analgesia
+   - NPO (Nil per os)
+3. **Investigation & Timing:** Upper endoscopy (EGD) within 12-24h
 4. **Contraindications:**
-   - Induction of emesis (causes re-exposure of esophagus to corrosive).
-   - Gastric lavage or chemical neutralization (causes thermal injury and perforation risk).
+   - Induction of emesis
+   - Gastric lavage / neutralization
 
 **Clinical Explanation:**
 التفسير بالعامية المصرية: حالات الـ Corrosive Ingestion من أشهر الكيسات المتكررة. النقطة المحورية هنا هي تجنب الـ Emesis والـ Neutralization تماماً لأنها بتعمل Perforation، وعمل المنظار في أول 12-24 ساعة لتحديد درجة الـ Burn.

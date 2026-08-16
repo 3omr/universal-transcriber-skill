@@ -3945,10 +3945,13 @@ For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
 3. concise numbered question 3
 **Model Answer:**
 1. **Category/Heading:**
-   - Concise English short answer grounded in source files/slides
+   - Concise keyword answer 1 (1 to 5 words)
+   - Concise keyword answer 2
 2. **Category/Heading:**
-   - Concise English short answer
-**Clinical Explanation:** Egyptian Arabic explanation covering clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
+   - Concise keyword answer
+**Clinical Explanation:** Egyptian Arabic explanation covering comprehensive clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
+
+Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking scheme style, 1 to 5 words per point). NEVER write long sentences, descriptive narratives, or paragraphs inside Model Answer. Put all detailed medical explanations and lecture context exclusively in **Clinical Explanation** (in Egyptian Arabic).
 
 A case carrying a Past Exams or Question Bank badge must also contain
 **Source:** with the exact source name and verified year.
