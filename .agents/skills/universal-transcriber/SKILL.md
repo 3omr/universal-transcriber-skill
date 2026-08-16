@@ -49,20 +49,28 @@ python3 skills/universal-transcriber/scripts/run_transcription.py \
 
 ### 2. Reconcile & Manifest
 
-Inspect the module's live inventory and author a temporary lecture manifest outside Git (e.g. `/tmp/<lecture>-manifest.json`):
+You can either use the **automatic manifest generator** (`--auto-manifest "<lecture_name>"`) or author a custom manifest JSON (e.g. `/tmp/<lecture>-manifest.json`):
 
-1. **Audio**: Group ordered parts into a single lecture unit (e.g. `["Corrosive 1.m4a", "Corrosive 2.m4a"]`).
-2. **Slides & References**: Pair corresponding slides and mark textbook references (`action: "auto"` or `"use_remote"`).
-3. **Assessment Files**: Classify files under `Questions/` as `past_exam` (with verified `year`) or `question_bank`.
-4. **Exam Style**: Include observed question patterns in `exam_style_profile`.
+1. **Auto-Manifest (Recommended)**: Pass `--auto-manifest "<lecture_title>"` directly to `run_transcription.py`. The engine automatically matches slides, audio recordings, question banks, and past exams.
+2. **Custom Manifest**:
+   - **Audio**: Group ordered parts into a single lecture unit (e.g. `["Corrosive 1.m4a", "Corrosive 2.m4a"]`).
+   - **Slides & References**: Pair corresponding slides and mark textbook references (`action: "auto"` or `"use_remote"`).
+   - **Assessment Files**: Classify files under `Questions/` as `past_exam` (with verified `year`) or `question_bank`.
+   - **Exam Style**: Include observed question patterns in `exam_style_profile`.
 
 *Full manifest schema and examples: [references/source-sync-and-manifest.md](references/source-sync-and-manifest.md).*
 
 ### 3. Draft & Agent In-Flight Repair
 
-Run the launcher in draft mode to execute preparation (conversions/OCR), upload necessary files, query NotebookLM, and produce an evidence-rich `.draft.md`:
+Run the launcher in draft mode to execute preparation (conversions/OCR), upload necessary files, query NotebookLM concurrently across all 5 sections, and produce an evidence-rich `.draft.md`:
 
 ```bash
+# Using Auto-Manifest (Fastest & Simplest):
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> \
+  --auto-manifest "<lecture_name>" --draft-only
+
+# Or using Custom Manifest:
 python3 skills/universal-transcriber/scripts/run_transcription.py \
   --workspace "$PWD" --module <module_id> \
   --source-manifest /tmp/<lecture>-manifest.json --draft-only

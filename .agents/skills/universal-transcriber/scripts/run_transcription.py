@@ -9,8 +9,10 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -543,6 +545,116 @@ def _manifest_references(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(normalized)
 
 
+def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
+    lecture_dir = module_root / "Lecture"
+    questions_dir = module_root / "Questions"
+    query_clean = lecture_query.strip()
+    query_tokens = [tok for tok in re.findall(r"\w+", query_clean.casefold()) if len(tok) > 1]
+
+    slide_files: list[Path] = []
+    audio_files: list[Path] = []
+    if lecture_dir.is_dir():
+        for item in sorted(lecture_dir.iterdir()):
+            if item.name.startswith("."):
+                continue
+            suffix = item.suffix.lower()
+            if suffix in {".pptx", ".pdf", ".ppsx", ".ppt", ".docx"}:
+                slide_files.append(item)
+            elif suffix in {".mp3", ".m4a", ".wav", ".aac", ".ogg"}:
+                audio_files.append(item)
+
+    def score_match(name: str) -> int:
+        name_lower = name.casefold()
+        score = 0
+        if query_clean.casefold() in name_lower:
+            score += 50
+        for tok in query_tokens:
+            if tok in name_lower:
+                score += 10
+        return score
+
+    best_slide = None
+    best_slide_score = -1
+    for slide in slide_files:
+        score = score_match(slide.name)
+        if score > best_slide_score:
+            best_slide_score = score
+            best_slide = slide
+
+    matched_audio: list[str] = []
+    for audio in audio_files:
+        if score_match(audio.name) > 0:
+            matched_audio.append(audio.name)
+
+    if not matched_audio:
+        if best_slide:
+            matched_audio = [best_slide.name]
+        else:
+            matched_audio = [f"{query_clean}.pdf"]
+
+    slide_path = f"Lecture/{best_slide.name}" if best_slide else f"Lecture/{query_clean}.pdf"
+
+    assessment_sources: list[dict[str, Any]] = []
+    if questions_dir.is_dir():
+        for item in sorted(questions_dir.iterdir()):
+            if item.name.startswith(".") or item.suffix.lower() not in {".pdf", ".txt", ".docx"}:
+                continue
+            years = [int(match) for match in re.findall(r"\b(20[12]\d)\b", item.name)]
+            if years:
+                assessment_sources.append({
+                    "path": f"Questions/{item.name}",
+                    "type": "past_exam",
+                    "year": max(years),
+                    "action": "auto",
+                })
+            else:
+                assessment_sources.append({
+                    "path": f"Questions/{item.name}",
+                    "type": "question_bank",
+                    "action": "auto",
+                })
+
+    exam_style_profile = {
+        "mcq": {
+            "register": "Short direct factual stems with parallel concise options",
+            "max_stem_words": 20,
+            "options": {
+                "count": 4,
+                "labels": "lowercase a. through d.",
+            },
+            "stem_patterns": [
+                "The following ...:-",
+                "... are:",
+                "... except:-",
+            ],
+        },
+        "written": {
+            "command_patterns": [
+                "Causes of ...: 1.... 2....",
+                "Treatment of ...",
+                "Mechanism of ...",
+            ],
+            "answer_shape": "Numbered keywords matching requested count",
+        },
+        "sample_scope": "Same college past exams and official question bank",
+    }
+
+    payload = {
+        "title": query_clean,
+        "recording_sources": matched_audio,
+        "slides": {
+            "path": slide_path,
+            "action": "auto",
+        },
+        "assessment_sources": assessment_sources,
+        "exam_style_profile": exam_style_profile,
+    }
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", query_clean).strip("-").lower() or "lecture"
+    manifest_path = Path(tempfile.gettempdir()) / f"{slug}-auto-manifest.json"
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest_path
+
+
 def _source_manifest(path: str) -> SourceManifest:
     payload = _read_source_manifest(path)
     recordings = _manifest_recording_names(payload)
@@ -785,6 +897,10 @@ def _parser() -> argparse.ArgumentParser:
         help="Agent-approved module source synchronization manifest",
     )
     parser.add_argument(
+        "--auto-manifest",
+        help="Automatically generate a complete manifest for the given lecture name/keyword",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Execute an approved source synchronization plan",
@@ -843,6 +959,12 @@ def main() -> int:
             _print_modules(discover_modules(workspace, args.modules_root))
             return 0
         context = _launcher_context(args)
+        if args.auto_manifest:
+            if args.source_manifest:
+                raise LauncherError("--auto-manifest cannot be combined with --source-manifest")
+            auto_manifest_path = generate_auto_manifest(context.module.paths.root, args.auto_manifest)
+            args.source_manifest = str(auto_manifest_path)
+            print(f"[Auto-Manifest] Generated manifest: {auto_manifest_path}")
         if args.sync_sources:
             if args.lecture or args.all or args.list or args.slides or args.source_manifest:
                 raise LauncherError(
