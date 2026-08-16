@@ -3244,6 +3244,23 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                     )
                     continue
 
+        if last_errors and any(
+            marker in err.casefold()
+            for err in last_errors
+            for marker in ("unsafe_duplicate_merge", "joined ocr words", "agent review is required")
+        ):
+            print(
+                f"[Recovery] {query.phase_name} requires Agent editorial review; "
+                "bypassing repeated LLM queries for immediate Agent in-flight repair"
+            )
+            raise PhaseValidationError(
+                query.phase_name,
+                last_errors,
+                last_answer,
+                last_source_names,
+                last_source_quarantine,
+            )
+
         if attempt < MAX_ATTEMPTS:
             print(
                 f"[!] {query.phase_name} failed validation on attempt "
