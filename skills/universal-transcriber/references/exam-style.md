@@ -30,17 +30,47 @@ Extract:
 
 ---
 
-## 3. Written Question Observations
+## 3. Written Question Observations & Formatting
 
 Extract:
 - **Command verbs**: `Enumerate`, `Mention`, `Causes of`, `Mechanism of`, `Treatment of`, `Give reason for`, `Compare between`.
 - **Punctuation & blanks**: `:-`, `:`, numbered blanks (`1.... 2.... 3....`).
 - **Point requirements**: Expected count of points (e.g. 4 points, 5 causes).
-- **Answer shape**: Structured sub-bullets, concise numbered keywords, or comparative tables.
+- **Answer shape**:
+  - `Model Answer`: Strictly ultra-concise keywords or short phrases (Egyptian exam mark scheme style, 1–5 words per bullet/numbered item).
+  - `Give Reason`: A short, direct clause identifying the primary physiological/chemical reason (e.g. `Hypothermia increases CO-Hb affinity (prevents CO dissociation)`).
+  - `Enumerate / Complete / List`: Exact numbered keywords (`1- ...`, `2- ...`, `3- ...`).
+  - `Clinical Explanation`: Full comprehensive clinical rationale, mechanisms, and lecturer remarks in natural Egyptian Arabic. Never put lengthy paragraphs inside `Model Answer`.
 
 ---
 
-## 4. Manifest Profile Format
+## 4. Clinical Cases & Specialty-Aware Standards
+
+Extract and follow the standard Egyptian medical exam breakdown matching the subject/specialty:
+
+### A. Subject-Specific Case Question Conventions
+- **Toxicology & Forensic Medicine**:
+  1. `What is the most likely diagnosis and severity?`
+  2. `What is the differential diagnosis (DDx) / characteristic sign (e.g. 3Cs of red skin)?`
+  3. `Mention key diagnostic investigations (e.g. COHb level, dilution test, ABG).`
+  4. `Outline the lines of treatment (TTT) / antidote / precautions / HBO indications.`
+- **Cardiology & Internal Medicine**:
+  1. `What is the most likely diagnosis?`
+  2. `What is the differential diagnosis (DDx) / characteristic clinical features (CP)?`
+  3. `Mention key investigations (ECG, Echocardiography, Biomarkers).`
+  4. `Outline pharmacological and interventional treatment (TTT).`
+- **Pediatrics / General Surgery / Pharmacology / Pathology**:
+  Follow standard clinical sequence: `Diagnosis` → `DDx / CP` → `Investigations` → `Treatment (TTT) / Contraindications`.
+
+### B. Case Rules for Generation
+- **Past-Exam Cases**: Reproduce all original sub-questions verbatim in their exact count and sequence.
+- **Synthesized IMP Cases**: Strictly follow the 4-part clinical breakdown above. Never create long narrative essay sub-questions (e.g. "Explain the dual physiological mechanisms...").
+- **Model Answer in Cases**: Ultra-concise keywords under clean sub-headings (1–5 words per point).
+- **Clinical Explanation in Cases**: Complete reasoning in Egyptian Arabic with lecturer pearls and diagnostic traps.
+
+---
+
+## 5. Manifest Profile Format
 
 Pass the observed profile inside the temporary source manifest:
 
@@ -60,17 +90,28 @@ Pass the observed profile inside the temporary source manifest:
     "command_patterns": [
       "Causes of ...: 1.... 2....",
       "Treatment of ...",
-      "Mechanism of ..."
+      "Mechanism of ...",
+      "Give Reason: ..."
     ],
-    "answer_shape": "Numbered keywords matching requested count"
+    "answer_shape": "Ultra-concise numbered keywords matching requested count (1-5 words)"
+  },
+  "cases": {
+    "style": "Standard Egyptian medical exam case breakdown matching subject conventions",
+    "sub_questions_pattern": [
+      "1. Diagnosis (or Most likely diagnosis)",
+      "2. DDx (Differential diagnosis) or Characteristic Clinical Picture (CP)",
+      "3. Investigations / Confirmatory laboratory tests",
+      "4. Treatment / Management (TTT / Antidote / Emergency measures)"
+    ],
+    "answer_shape": "Ultra-concise keyword bullets under standard clinical headings (1 to 5 words per point)"
   }
 }
 ```
 
 ---
 
-## 5. Duplicate Question Review Boundary
+## 6. Duplicate Question Review & Fast-Fail Boundary
 
 - **Automatic Safe Merge**: The engine merges identical or safely OCR-equivalent questions across exam years, combining years in ascending order:
   `### Question 1 **[Past Exams - 2021, 2022, 2023]**`
-- **Unsafe Duplicate Merge**: When two questions share a similar stem but differ in options, negation (`except`), requested count, or answer key, the engine halts and flags `unsafe_duplicate_merge`. The Agent must inspect source evidence and either keep them separate or resolve the discrepancy.
+- **Fast-Fail on Duplicate Discrepancies & Joined OCR**: When questions share a similar stem but differ in options/count, or when joined OCR words occur, the engine fast-fails immediately to Agent Recovery without repeating slow NotebookLM retry loops. The Agent normalizes and repairs questions directly.

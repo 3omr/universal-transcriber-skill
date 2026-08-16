@@ -43,6 +43,10 @@ Use these exact terms. Do not paraphrase or coin synonyms.
    - Never repeatedly query NotebookLM when raw text contains OCR artifacts or duplicate questions across years. The Agent repairs joined words and formats questions directly.
 7. **Single Source of Truth & Local/Remote Deduplication**:
    - Retain only one clean copy of each document. Immediately delete redundant local formats (e.g. `.ppsx` when `.pdf` is ready) and remove stale/corrupted files from NotebookLM.
+8. **Ultra-Concise Keyword Model Answers (Section 4 & 5)**:
+   - In Written Questions and Clinical Cases, `Model Answer` must strictly consist of ultra-concise keywords and short phrases (Egyptian exam mark scheme style, 1–5 words per point/bullet). All detailed clinical explanations, physiology, and doctor's remarks belong exclusively in `Clinical Explanation` in Egyptian Arabic.
+9. **Subject-Aware Clinical Case Structure (Section 5)**:
+   - Clinical Cases must strictly follow the standard Egyptian exam breakdown for the subject (1. Diagnosis & Severity, 2. DDx / Characteristic Clinical Picture, 3. Key Investigations / Lab tests, 4. Treatment / TTT / Antidote / Precautions). Never invent artificial narrative essay sub-questions.
 
 ---
 
