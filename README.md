@@ -1,11 +1,11 @@
 # Universal Medical Lecture Transcriber
 
-[![GitHub Release](https://img.shields.io/github/v/release/3omr/universal-transcriber-skill?color=blue&label=version)](https://github.com/3omr/universal-transcriber-skill/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/3omr/universal-transcriber-skill?color=blue&label=version)](https://github.com/3omr/universal-transcriber-skill/releases/latest)
 [![GitHub Downloads](https://img.shields.io/github/downloads/3omr/universal-transcriber-skill/total.svg?color=success)](https://github.com/3omr/universal-transcriber-skill/releases)
 [![skills.sh](https://img.shields.io/badge/skills.sh-catalog-orange.svg)](skills.sh.json)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![GitHub Stars](https://img.shields.io/github/stars/3omr/universal-transcriber-skill?style=flat&color=yellow)](https://github.com/3omr/universal-transcriber-skill/stargazers)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](#license)
 
 **Turn medical lecture recordings, slides, question banks, and past exams into structured, authoritative 5-section study guides blending detailed Egyptian Arabic explanations with English medical terminology.**
 
