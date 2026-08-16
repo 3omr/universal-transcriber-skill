@@ -1,23 +1,55 @@
 # Universal Medical Lecture Transcriber
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![GitHub Release](https://img.shields.io/github/v/release/3omr/universal-transcriber-skill?color=blue&label=version)](https://github.com/3omr/universal-transcriber-skill/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/3omr/universal-transcriber-skill/total.svg?color=success)](https://github.com/3omr/universal-transcriber-skill/releases)
 [![skills.sh](https://img.shields.io/badge/skills.sh-catalog-orange.svg)](skills.sh.json)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![GitHub Stars](https://img.shields.io/github/stars/3omr/universal-transcriber-skill?style=flat&color=yellow)](https://github.com/3omr/universal-transcriber-skill/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Turn medical lecture recordings, slides, question banks, and past exams into structured, authoritative 5-section study guides blending detailed Egyptian Arabic explanations with English medical terminology.**
 
+---
+
+## ⚡ Quick Install (تثبيت السكيل)
+
+Choose your agent platform below to install the skill:
+
+### Option 1: skills.sh / Universal AI Agent CLI (Recommended)
 ```bash
-# Add skill to your AI Agent
 npx skills add 3omr/universal-transcriber-skill
 ```
 
-Then ask your agent:
+### Option 2: Google Antigravity & Codex
+Install directly into your workspace's `.agents/skills` directory:
+```bash
+mkdir -p .agents/skills
+git clone https://github.com/3omr/universal-transcriber-skill.git .agents/skills/universal-transcriber
+```
+
+### Option 3: Claude Code (Global Skill)
+Install globally to make it available across all your Claude Code workspaces:
+```bash
+git clone https://github.com/3omr/universal-transcriber-skill.git ~/.claude/skills/universal-transcriber
+```
+
+### Option 4: Cursor / Windsurf / Other Editors
+Clone into your repository or add as a git submodule:
+```bash
+git clone https://github.com/3omr/universal-transcriber-skill.git skills/universal-transcriber
+```
+
+---
+
+## 🚀 How to Prompt Your Agent (طريقة الاستخدام)
+
+Once installed, simply prompt your AI agent:
 
 ```text
 اعمل تفريغ لمحاضرة Corrosives لموديول toxo
 ```
 
-Or run an entire module in parallel with native sub-agents:
+Or orchestrate an entire medical module in parallel with native sub-agents:
 
 ```text
 فرغ كل محاضرات موديول toxo وخلي كل محاضرة في agent مستقل
