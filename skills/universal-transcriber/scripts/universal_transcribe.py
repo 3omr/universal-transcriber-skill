@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import fcntl
 import hashlib
 import json
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -146,6 +148,34 @@ JOINED_COMMON_WORD_PATTERN = re.compile(
     r"[A-Za-z]{3,}\b",
     flags=re.IGNORECASE,
 )
+MEDICAL_OCR_ALLOWLIST = frozenset({
+    "amphetamine",
+    "amfetamine",
+    "anaesthesia",
+    "anesthesia",
+    "catheter",
+    "chemotherapy",
+    "chlorpromazine",
+    "deferoxamine",
+    "dexamethasone",
+    "diethylcarbamazine",
+    "dimercaprol",
+    "erythema",
+    "hyperthermia",
+    "hypothermia",
+    "hypothalamus",
+    "methane",
+    "neostigmine",
+    "noradrenaline",
+    "physostigmine",
+    "polyurethane",
+    "pralidoxime",
+    "promethazine",
+    "pyridostigmine",
+    "quadrant",
+    "radiotherapy",
+    "succimer",
+})
 NOTEBOOK_CITATION_PATTERN = re.compile(
     r"\[\s*\d+(?:\s*[,،、;\-–—]\s*\d+)*\s*\]"
 )
@@ -2722,7 +2752,10 @@ def _project_heading_pattern(phase_name: str) -> re.Pattern[str] | None:
     if phase_name == "Written Questions":
         return re.compile(r"^### Question\s+\d+", flags=re.MULTILINE)
     if phase_name == "Clinical Cases":
-        return re.compile(r"(\*\*🩺 Clinical Case )\d+(:\*\*)")
+        return re.compile(
+            r"(?:^### (?:Clinical )?Case\s+\d+|(\*\*🩺 Clinical Case )\d+(:\*\*))",
+            flags=re.MULTILINE,
+        )
     return None
 
 
@@ -2736,13 +2769,18 @@ def _renumber_project_answer(
 
     def replace(match: re.Match[str]) -> str:
         nonlocal number
-        replacement = (
-            f"### MCQ {number}"
-            if phase_name == "MCQs"
-            else f"### Question {number}"
-            if phase_name == "Written Questions"
-            else f"**🩺 Clinical Case {number}:**"
-        )
+        if phase_name == "MCQs":
+            replacement = f"### MCQ {number}"
+        elif phase_name == "Written Questions":
+            replacement = f"### Question {number}"
+        elif phase_name == "Clinical Cases":
+            matched_str = match.group(0)
+            if matched_str.startswith("###"):
+                replacement = f"### Clinical Case {number}"
+            else:
+                replacement = f"**🩺 Clinical Case {number}:**"
+        else:
+            replacement = match.group(0)
         number += 1
         return replacement
 
@@ -3205,6 +3243,23 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                         "retrying with the compact assessment prompt"
                     )
                     continue
+
+        if last_errors and any(
+            marker in err.casefold()
+            for err in last_errors
+            for marker in ("unsafe_duplicate_merge", "joined ocr words", "agent review is required")
+        ):
+            print(
+                f"[Recovery] {query.phase_name} requires Agent editorial review; "
+                "bypassing repeated LLM queries for immediate Agent in-flight repair"
+            )
+            raise PhaseValidationError(
+                query.phase_name,
+                last_errors,
+                last_answer,
+                last_source_names,
+                last_source_quarantine,
+            )
 
         if attempt < MAX_ATTEMPTS:
             print(
@@ -3749,14 +3804,14 @@ the Past Exams badge when a question-bank copy also supports it. Do not merge
 questions when the options, negation, requested count, or clinical meaning differ.
 
 Before returning the section, perform an editorial pass: put one option on each
-line in the learned label order, make Correct Answer start with an existing
+line in the learned label order (a., b., c., d.), make Correct Answer start with an existing
 option label, remove NotebookLM citation markers such as [34،86], and stop on
 any word whose OCR cannot be restored confidently.
 
 For every item use this exact field contract with ### MCQ N and its badge(s):
-**Question (verbatim):**, **Options (verbatim):**, **Source:**,
-**Correct Answer:**, and **Clinical Explanation (Egyptian Arabic):**. If no
-matching verbatim MCQ exists, return exactly {NO_MCQS}. Return section body only;
+**Question:**, **Options:** (with each option on a new line: a. ..., b. ..., c. ..., d. ...),
+**Source:** (if past exam/question bank), **Correct Answer:**, and **Clinical Explanation:**.
+If no matching MCQ exists, return exactly {NO_MCQS}. Return section body only;
 never use # or ## headings."""
 
 
@@ -3777,8 +3832,8 @@ matter, wording, answer, or provenance. Keep stems short and direct; do not make
 a clinical vignette unless the profile shows that pattern.
 
 For every item use ### MCQ N **[IMP]**, then **Question:**, **Options:**,
-**Correct Answer:**, and **Clinical Explanation (Egyptian Arabic):**. Put one
-option on each line, ensure the correct answer starts with an existing option
+**Correct Answer:**, and **Clinical Explanation:**. Put one
+option on each line (a., b., c., d.), ensure the correct answer starts with an existing option
 label, and use no Source field or verbatim label. Return section body only;
 never use # or ## headings. If no emphasized point supports an MCQ, return
 exactly {NO_MCQS}."""
@@ -3812,12 +3867,19 @@ and source line. Keep questions with different command verbs, requested counts,
 scope, or medical meaning separate; send uncertain semantic matches for Agent
 review instead of merging them.
 
-For every item use ### Question N with badge(s), then **Question (verbatim):**,
-**Source:**, and **Model Answer (Short):**. Answers must be concise and direct:
-short bullets for lists, one short mechanism sentence for Give Reason, and a
-compact Markdown table for Compare. Run an editorial OCR pass before returning:
-repair split letters and joined words only when the source supports the repair,
-remove NotebookLM citation markers, and flag unresolved wording instead of
+For every item use ### Question N with badge(s), then **Question:**,
+**Source:** (if past exam/question bank), **Model Answer:**, and **Clinical Explanation:**.
+Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
+- For lists, blanks, and enumerations (e.g. 1... 2... 3...): provide only numbered concise keywords:
+  1- Concise keyword 1
+  2- Concise keyword 2
+  3- Concise keyword 3
+- For Give Reason: one concise clause (e.g. Due to inhibition of Cytochrome Oxidase).
+- For Compare: a compact Markdown table containing concise keywords.
+- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
+Clinical Explanation must be in Egyptian Arabic explaining the detailed clinical reasoning, mechanisms, and doctor emphasis.
+Run an editorial OCR pass before returning: repair split letters and joined words only when the source
+supports the repair, remove NotebookLM citation markers, and flag unresolved wording instead of
 guessing. No introduction, conclusion, or filler. If no grounded written
 question exists, return exactly {NO_WRITTEN}. Return section body only; never use
 # or ## headings."""
@@ -3839,35 +3901,66 @@ answer shape. Do not replace a direct complete, enumerate, causes of, mechanism
 of, treatment of, or give reason form with a long academic essay prompt unless
 the profile shows that pattern.
 
-For every item use ### Question N **[IMP]**, then **Question:** and
-**Model Answer (Short):**. Use no Source field or verbatim label. Answers must be
-concise: short bullets for lists, one short mechanism sentence for Give Reason,
-and a compact Markdown table for Compare. Return section body only; never use #
-or ## headings. If no emphasized point supports a written question, return
+For every item use ### Question N **[IMP]**, then **Question:**,
+**Model Answer:**, and **Clinical Explanation:**. Use no Source field or verbatim label.
+Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
+- For lists, blanks, and enumerations: provide only numbered concise keywords (1- Keyword 1\n2- Keyword 2\n...).
+- For Give Reason: one concise clause.
+- For Compare: a compact Markdown table with concise keywords.
+- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
+Clinical Explanation must be in Egyptian Arabic explaining the clinical reasoning and exam pearls.
+Return section body only; never use # or ## headings. If no emphasized point supports a written question, return
 exactly {NO_WRITTEN}."""
 
 
-def build_case_prompt(title: str, context: str, badge_instructions: str) -> str:
+def build_case_prompt(
+    title: str,
+    context: str,
+    badge_instructions: str,
+    exam_style_profile: dict[str, Any] | None = None,
+) -> str:
+    context = _compact_assessment_context(context)
+    style_context = render_exam_style_profile(
+        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
+    )
     return f"""Create only the body of the 🩺 Clinical Cases section for '{title}'.
 
 {context}
-Create 2-3 clinically relevant cases within the recording's taught scope. Put
-every complete case inside its own > [!TIP] block. Every line belonging to the
-case must start with >. Each block must contain > **🩺 Clinical Case N:** with
-evidence-backed badge(s), > **Scenario:**, > **Questions:**, and
-> **Model Answer (Short):**. Ask diagnostic, investigation, findings, and/or
-management questions as appropriate. Each Model Answer must contain only 3-6
-one-sentence bullets and the entire answer after its field label must stay under
-900 characters. Use this exact quoted structure for every case:
-> [!TIP]
-> **🩺 Clinical Case N:** **[IMP]**
-> **Scenario:** concise scenario
-> **Questions:** concise numbered questions
-> **Model Answer (Short):**
-> - concise answer point
+
+{style_context}
+
+Create 2-3 clinically relevant cases within the recording's taught scope.
+Study past exam patterns and observed question structures from the course to match:
+- The typical case scenario style and length
+- For cases sourced from past exams, reproduce all original sub-questions verbatim in their exact count, text, and sequence without omitting or shortening any sub-questions.
+- For newly synthesized cases, questions MUST strictly follow the standard Egyptian medical exam case breakdown matching the subject/specialty (e.g. 1. Diagnosis / Most likely diagnosis, 2. DDx (Differential diagnosis) or Pathognomonic Clinical Picture (CP), 3. Diagnostic Investigations / Lab tests, 4. Treatment (TTT) / Specific Antidote / Emergency management / Precautions). NEVER create long essay sub-questions (e.g. 'Explain the dual physiological mechanisms...').
+- Clear, concise, standard clinical exam questions without filler.
+
+For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
+### Clinical Case N with evidence-backed badge(s)
+**Scenario:** concise clinical scenario
+**Questions:**
+1. What is the most likely diagnosis?
+2. What is the differential diagnosis (DDx) / characteristic clinical feature?
+3. Mention key diagnostic investigations.
+4. Outline the lines of treatment (TTT) / antidote.
+**Model Answer:**
+1. **Diagnosis:**
+   - Concise keyword answer (1 to 5 words)
+2. **DDx / Clinical Picture:**
+   - Concise keyword 1
+   - Concise keyword 2
+3. **Investigations:**
+   - Concise keyword
+4. **Treatment (TTT):**
+   - Concise keyword 1
+   - Concise keyword 2
+**Clinical Explanation:** Egyptian Arabic explanation covering comprehensive clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
+
+Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking scheme style, 1 to 5 words per point). NEVER write long sentences, descriptive narratives, or paragraphs inside Model Answer. Put all detailed medical explanations and lecture context exclusively in **Clinical Explanation** (in Egyptian Arabic).
 
 A case carrying a Past Exams or Question Bank badge must also contain
-> **Source:** with the exact source name and verified year.
+**Source:** with the exact source name and verified year.
 
 {badge_instructions}
 Use a past-exam or question-bank badge only for a verbatim or traceably adapted
@@ -3985,7 +4078,16 @@ def validate_imp(query_result: QueryResult) -> list[str]:
 
 
 def _section_blocks(answer: str, heading_prefix: str) -> list[str]:
-    pattern = rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)"
+    if heading_prefix in ("Clinical Case", "Case"):
+        pattern = r"(?ms)^(?:[ \t]*>[ \t]*)?(?:### (?:Clinical )?Case\s+\d+|>\s*\*\*🩺 Clinical Case \d+:?\*\*).*?(?=(?:^(?:[ \t]*>[ \t]*)?### (?:Clinical )?Case\s+\d+|^>\s*\*\*🩺 Clinical Case \d+:?\*\*|\Z))"
+        blocks = re.findall(pattern, answer)
+        if blocks:
+            return blocks
+        if "> [!TIP]" in answer:
+            return [b.strip() for b in answer.split("> [!TIP]") if b.strip()]
+        pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |\Z))"
+        return re.findall(pattern, answer)
+    pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |\Z))"
     return re.findall(pattern, answer)
 
 
@@ -3998,8 +4100,22 @@ def _source_field_matches(block: str, evidence_sources: list[str]) -> bool:
     )
 
 
+def _clean_source_field_item(item: str) -> str:
+    cleaned = item.strip().strip("'\"`")
+    cleaned = re.sub(r"\s*\(\d{4}\)$", "", cleaned).strip().strip("'\"`")
+    return cleaned
+
+
 def _source_fields(block: str) -> list[str]:
-    return re.findall(r"^(?:> )?\*\*Source:\*\*\s*(.+)$", block, re.MULTILINE)
+    raw_lines = re.findall(r"^(?:[ \t]*>[ \t]*)?\*\*Source:\*\*\s*(.+)$", block, re.MULTILINE)
+    items: list[str] = []
+    for line in raw_lines:
+        parts = re.split(r"\s+and\s+|\s*,\s*", line)
+        for part in parts:
+            cleaned = _clean_source_field_item(part)
+            if cleaned:
+                items.append(cleaned)
+    return items
 
 
 def _catalog_matches(
@@ -4301,19 +4417,48 @@ def _question_provenance_errors(
 
 def _field_content(block: str, field_name: str) -> str:
     pattern = (
-        rf"(?ms)^\*\*{re.escape(field_name)}:\*\*\s*"
-        rf"(.*?)(?=^\*\*[^*\n]+:\*\*|\Z)"
+        rf"(?ms)^\s*(?:>\s*)?\*\*{re.escape(field_name)}:\*\*\s*"
+        rf"(.*?)(?=^\s*(?:>\s*)?\*\*[^*\n]+:\*\*|\Z)"
     )
     match = re.search(pattern, block)
     return match.group(1).strip() if match else ""
 
 
 def _question_content(block: str) -> str:
-    for field_name in ("Question (verbatim)", "Question"):
+    for field_name in ("Question", "Question (verbatim)"):
         content = _field_content(block, field_name)
         if content:
             return content
     return ""
+
+
+def _options_content(block: str) -> str:
+    for field_name in ("Options", "Options (verbatim)"):
+        content = _field_content(block, field_name)
+        if content:
+            return content
+    return ""
+
+
+def _model_answer_content(block: str) -> str:
+    for field_name in ("Model Answer", "Model Answer (Short)"):
+        content = _field_content(block, field_name)
+        if content:
+            return content
+    return ""
+
+
+def _explanation_content(block: str) -> str:
+    for field_name in (
+        "Clinical Explanation",
+        "Clinical Explanation (Egyptian Arabic)",
+        "Explanation",
+    ):
+        content = _field_content(block, field_name)
+        if content:
+            return content
+    return ""
+
 
 
 def _question_fingerprint_text(value: str) -> str:
@@ -4405,6 +4550,84 @@ def _merged_badges(
     return badges
 
 
+def _normalize_mcq_block(block: str) -> str:
+    lines = block.splitlines()
+    cleaned_lines = [
+        line[2:] if line.startswith("> ") else line[1:] if line.startswith(">") else line
+        for line in lines
+    ]
+    text = "\n".join(cleaned_lines).strip()
+    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", text)
+    text = re.sub(r"\*\*Options\s*(?:\(verbatim\))?:\*\*", "**Options:**", text)
+    text = re.sub(
+        r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
+        "**Clinical Explanation:**",
+        text,
+    )
+    options_match = re.search(
+        r"(?ms)^\*\*Options:\*\*[ \t]*(.*?)(?=^\*\*[^*\n]+:\*\*|\Z)", text
+    )
+    if options_match:
+        raw_options = options_match.group(1).strip()
+        entries = _option_entries(raw_options)
+        if entries:
+            formatted_options = "\n".join(f"- **{k}.** {v}" for k, v in entries.items())
+            start, end = options_match.span(0)
+            text = text[:start] + "**Options:**\n" + formatted_options + "\n\n" + text[end:].lstrip()
+    return text.strip()
+
+
+def _normalize_written_block(block: str) -> str:
+    lines = block.splitlines()
+    cleaned_lines = [
+        line[2:] if line.startswith("> ") else line[1:] if line.startswith(">") else line
+        for line in lines
+    ]
+    text = "\n".join(cleaned_lines).strip()
+    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", text)
+    text = re.sub(r"\*\*Model Answer\s*(?:\(Short\))?:\*\*", "**Model Answer:**", text)
+    text = re.sub(
+        r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
+        "**Clinical Explanation:**",
+        text,
+    )
+    return text.strip()
+
+
+def _normalize_case_block(block: str) -> str:
+    lines = block.splitlines()
+    cleaned_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in ("> [!TIP]", "[!TIP]"):
+            continue
+        if stripped.startswith("> "):
+            stripped = stripped[2:]
+        elif stripped.startswith(">"):
+            stripped = stripped[1:]
+        cleaned_lines.append(stripped)
+    text = "\n".join(cleaned_lines).strip()
+    text = re.sub(
+        r"^\*\*🩺 Clinical Case\s+(\d+):\*\*(.*)$",
+        r"### Clinical Case \1\2",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        r"^### Case\s+(\d+)(.*)$",
+        r"### Clinical Case \1\2",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(r"\*\*Model Answer\s*(?:\(Short\))?:\*\*", "**Model Answer:**", text)
+    text = re.sub(
+        r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
+        "**Clinical Explanation:**",
+        text,
+    )
+    return text.strip()
+
+
 def _merge_question_blocks(
     blocks: list[str],
     heading_prefix: str,
@@ -4432,13 +4655,25 @@ def _merge_question_blocks(
         base,
     ).strip()
     source_lines = "\n".join(f"**Source:** {source}" for source in source_names)
-    anchor = "**Correct Answer:**" if heading_prefix == "MCQ" else "**Model Answer (Short):**"
+    anchors = ("**Correct Answer:**", "**Model Answer:**", "**Model Answer (Short):**")
     if source_lines:
-        if anchor in base:
-            base = base.replace(anchor, f"{source_lines}\n{anchor}", 1)
+        found_anchor = None
+        for a in anchors:
+            if a in base:
+                found_anchor = a
+                break
+        if found_anchor:
+            base = base.replace(found_anchor, f"{source_lines}\n{found_anchor}", 1)
         else:
             base = f"{base}\n{source_lines}"
-    return f"{heading}{''.join(f' {badge}' for badge in badges)}\n\n{base.strip()}"
+    merged_block = f"{heading}{''.join(f' {badge}' for badge in badges)}\n\n{base.strip()}"
+    if heading_prefix == "MCQ":
+        return _normalize_mcq_block(merged_block)
+    elif heading_prefix == "Question":
+        return _normalize_written_block(merged_block)
+    elif heading_prefix in ("Clinical Case", "Case"):
+        return _normalize_case_block(merged_block)
+    return merged_block
 
 
 def deduplicate_question_section(
@@ -4447,34 +4682,55 @@ def deduplicate_question_section(
     year_map: dict[int, list[str]] | None = None,
     evidence_catalog: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Merge only exact/OCR-safe duplicate question blocks."""
+    """Merge exact, semantic, and OCR duplicate question blocks automatically."""
     blocks = _section_blocks(answer, heading_prefix)
-    if len(blocks) < 2:
+    if not blocks:
         return answer
+    normalized_blocks = [
+        _normalize_mcq_block(block)
+        if heading_prefix == "MCQ"
+        else _normalize_written_block(block)
+        if heading_prefix == "Question"
+        else _normalize_case_block(block)
+        for block in blocks
+    ]
     groups: dict[tuple[str, bool], list[str]] = {}
     order: list[tuple[str, bool]] = []
-    for block in blocks:
+    for block in normalized_blocks:
         group_key = _question_group_key(block, heading_prefix)
         if group_key not in groups:
             order.append(group_key)
             groups[group_key] = []
         groups[group_key].append(block)
-    if all(len(groups[group_key]) == 1 for group_key in order):
-        return answer
+
     merged = [
         _merge_question_blocks(
             groups[group_key], heading_prefix, year_map or {}, evidence_catalog
         )
         for group_key in order
     ]
-    matches = list(
-        re.finditer(
-            rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)",
-            answer,
+    if heading_prefix in ("Clinical Case", "Case"):
+        matches = list(
+            re.finditer(
+                r"(?ms)^(?:### (?:Clinical )?Case\s+\d+|> \[!TIP\]).*?(?=(?:^### (?:Clinical )?Case\s+\d+|^> \[!TIP\]|^## |\Z))",
+                answer,
+            )
         )
-    )
+    else:
+        matches = list(
+            re.finditer(
+                rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)",
+                answer,
+            )
+        )
+    if not matches:
+        return answer
     prefix = answer[: matches[0].start()]
     suffix = answer[matches[-1].end() :]
+    if prefix and not prefix.endswith("\n\n"):
+        prefix = prefix.rstrip() + "\n\n"
+    if suffix and not suffix.startswith("\n\n"):
+        suffix = "\n\n" + suffix.lstrip()
     return prefix + "\n\n".join(merged) + suffix
 
 
@@ -4491,7 +4747,12 @@ def renumber_question_section(answer: str, heading_prefix: str) -> str:
             line,
         )
 
-    return re.sub(rf"^### {re.escape(heading_prefix)}\s+\d+[^\n]*$", replace, answer, flags=re.MULTILINE)
+    return re.sub(
+        rf"^### {re.escape(heading_prefix)}\s+\d+[^\n]*$",
+        replace,
+        answer,
+        flags=re.MULTILINE,
+    )
 
 
 def normalize_question_result(
@@ -4551,14 +4812,27 @@ def _option_keys(options: str) -> list[str]:
     return list(_option_entries(options))
 
 
+def _clean_option_text(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^(?:[ \t*>-]|\*\*)+", "", cleaned)
+    cleaned = re.sub(r"(?:\s*\*\*)+$", "", cleaned)
+    return cleaned.strip()
+
+
 def _option_entries(options: str) -> dict[str, str]:
+    cleaned_options = re.sub(r"(?m)^[ \t]*>[ \t]?", "", options)
     markers = list(
-        re.finditer(r"(?<![A-Za-z0-9])([a-dA-D])\s*[\.)]\s*", options)
+        re.finditer(
+            r"(?<![A-Za-z0-9])(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*(?:\*\*)?",
+            cleaned_options,
+        )
     )
     return {
-        marker.group(1).casefold(): options[marker.end() : next_start].strip()
+        marker.group(1).casefold(): _clean_option_text(
+            cleaned_options[marker.end() : next_start]
+        )
         for marker, next_start in zip(
-            markers, [*(_match.start() for _match in markers[1:]), len(options)]
+            markers, [*(_match.start() for _match in markers[1:]), len(cleaned_options)]
         )
     }
 
@@ -4577,8 +4851,11 @@ def _ocr_quality_errors(text: str, field_name: str) -> list[str]:
         errors.append(f"{field_name} contains NotebookLM citation residue")
     if BROKEN_OCR_TOKEN_PATTERN.search(text):
         errors.append(f"{field_name} contains broken OCR word spacing")
-    if JOINED_COMMON_WORD_PATTERN.search(text):
-        errors.append(f"{field_name} contains joined OCR words")
+    for match in JOINED_COMMON_WORD_PATTERN.finditer(text):
+        token = match.group(0).casefold()
+        if token not in MEDICAL_OCR_ALLOWLIST:
+            errors.append(f"{field_name} contains joined OCR words")
+            break
     return errors
 
 
@@ -4586,14 +4863,12 @@ def _option_shape_errors(
     block: str, block_number: int, profile: dict[str, Any]
 ) -> list[str]:
     is_imp = "**[IMP]**" in block
-    expected_field = "Options" if is_imp else "Options (verbatim)"
-    wrong_field = "Options (verbatim)" if is_imp else "Options"
     errors: list[str] = []
-    has_expected_field = f"**{expected_field}:**" in block
-    has_wrong_field = f"**{wrong_field}:**" in block
-    if has_wrong_field and not has_expected_field:
+    if is_imp and "**Options (verbatim):**" in block:
         errors.append(f"MCQ {block_number} uses the wrong options field for its badge")
-    options = _field_content(block, expected_field)
+    options = _options_content(block)
+    if not options:
+        return [f"MCQ {block_number} [missing_field]: missing **Options:**"]
     keys = _option_keys(options)
     expected_keys = _expected_option_keys(profile)
     if keys != list(expected_keys):
@@ -4608,7 +4883,8 @@ def _correct_answer_errors(
     block: str, block_number: int, options: str
 ) -> list[str]:
     answer = _field_content(block, "Correct Answer")
-    match = re.match(r"([a-dA-D])\s*[\.)]\s*", answer)
+    answer = re.sub(r"(?m)^[ \t]*>[ \t]?", "", answer).strip()
+    match = re.match(r"(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*", answer)
     if not match:
         return [f"MCQ {block_number} Correct Answer must start with an option label"]
     option_entries = _option_entries(options)
@@ -4661,8 +4937,7 @@ def _mcq_editorial_errors(
             continue
         errors += _ocr_quality_errors(question, f"MCQ {block_number} question")
         errors += _option_shape_errors(block, block_number, profile)
-        options = _field_content(block, "Options (verbatim)")
-        options = options or _field_content(block, "Options")
+        options = _options_content(block)
         errors += _correct_answer_errors(block, block_number, options)
         errors += _ocr_quality_errors(
             _field_content(block, "Correct Answer"),
@@ -4699,18 +4974,18 @@ def _mcq_field_errors(answer: str) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "MCQ"):
         number = _question_number(block, "MCQ")
-        question_field = (
-            "**Question:**" if "**[IMP]**" in block else "**Question (verbatim):**"
-        )
-        option_field = "**Options:**" if "**[IMP]**" in block else "**Options (verbatim):**"
-        for field_name in (
-            question_field,
-            option_field,
-            "**Correct Answer:**",
-            "**Clinical Explanation (Egyptian Arabic):**",
-        ):
-            if field_name not in block:
-                errors.append(f"MCQ {number} [missing_field]: missing {field_name}")
+        has_question = bool(_question_content(block))
+        has_options = bool(_options_content(block))
+        has_correct = "**Correct Answer:**" in block
+        has_explanation = bool(_explanation_content(block))
+        if not has_question:
+            errors.append(f"MCQ {number} [missing_field]: missing **Question:**")
+        if not has_options:
+            errors.append(f"MCQ {number} [missing_field]: missing **Options:**")
+        if not has_correct:
+            errors.append(f"MCQ {number} [missing_field]: missing **Correct Answer:**")
+        if not has_explanation:
+            errors.append(f"MCQ {number} [missing_field]: missing **Clinical Explanation:**")
         if "**[IMP]**" not in block and "**Source:**" not in block:
             errors.append(f"MCQ {number} [missing_source]: missing **Source:**")
     return errors
@@ -4720,14 +4995,16 @@ def _written_field_errors(answer: str) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "Question"):
         number = _question_number(block, "Question")
-        question_field = (
-            "**Question:**" if "**[IMP]**" in block else "**Question (verbatim):**"
-        )
-        for field_name in (question_field, "**Model Answer (Short):**"):
-            if field_name not in block:
-                errors.append(
-                    f"Question {number} [missing_field]: missing {field_name}"
-                )
+        has_question = bool(_question_content(block))
+        has_model_answer = bool(_model_answer_content(block))
+        if not has_question:
+            errors.append(
+                f"Question {number} [missing_field]: missing **Question:**"
+            )
+        if not has_model_answer:
+            errors.append(
+                f"Question {number} [missing_field]: missing **Model Answer:**"
+            )
         if "**[IMP]**" not in block and "**Source:**" not in block:
             errors.append(f"Question {number} [missing_source]: missing **Source:**")
     return errors
@@ -4789,12 +5066,15 @@ def validate_mcqs(
     return errors
 
 
-def _long_model_answer_errors(answer: str, maximum_characters: int) -> list[str]:
+def _long_model_answer_errors(answer: str, base_characters: int = 2_000) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "Question"):
         number = _question_number(block, "Question")
-        model_answer = block.partition("**Model Answer (Short):**")[2]
-        if len(model_answer.strip()) > maximum_characters:
+        question_text = _question_content(block)
+        sub_parts = len(re.findall(r"(?:^|\n)\s*(?:\d+[\.)]|[a-e][\.)])", question_text))
+        max_chars = base_characters + (max(0, sub_parts - 1) * 1_000)
+        model_answer = _model_answer_content(block)
+        if len(model_answer.strip()) > max_chars:
             errors.append(
                 f"Question {number} [model_answer_too_long]: model answer is not concise"
             )
@@ -4864,6 +5144,17 @@ def _has_imp_badge(case_block: str) -> bool:
     )
 
 
+def _case_blocks(answer: str) -> list[str]:
+    standard_blocks = _section_blocks(answer, "Clinical Case")
+    if not standard_blocks:
+        standard_blocks = _section_blocks(answer, "Case")
+    if standard_blocks:
+        return standard_blocks
+    if "> [!TIP]" in answer:
+        return [b.strip() for b in answer.split("> [!TIP]") if b.strip()]
+    return []
+
+
 def _case_block_evidence_errors(
     case_block: str, query_result: QueryResult, evidence: CaseEvidence
 ) -> list[str]:
@@ -4886,7 +5177,7 @@ def _case_block_evidence_errors(
 def _case_source_errors(
     query_result: QueryResult, evidence: CaseEvidence
 ) -> list[str]:
-    case_blocks = query_result.answer.split("> [!TIP]")[1:]
+    case_blocks = _case_blocks(query_result.answer)
     errors = [
         error
         for case_block in case_blocks
@@ -4900,22 +5191,42 @@ def _case_source_errors(
 
 
 def _case_field_errors(answer: str, case_count: int) -> list[str]:
+    case_blocks = _case_blocks(answer)
     errors: list[str] = []
-    for field_name in (
-        "> **🩺 Clinical Case",
-        "> **Scenario:**",
-        "> **Questions:**",
-        "> **Model Answer (Short):**",
-    ):
-        if answer.count(field_name) < case_count:
-            errors.append(f"clinical-case response is missing {field_name}")
+    for idx, block in enumerate(case_blocks, start=1):
+        has_scenario = "**Scenario:**" in block or "> **Scenario:**" in block
+        has_questions = "**Questions:**" in block or "> **Questions:**" in block
+        has_model_answer = (
+            "**Model Answer:**" in block
+            or "**Model Answer (Short):**" in block
+            or "> **Model Answer:**" in block
+            or "> **Model Answer (Short):**" in block
+        )
+        if not has_scenario:
+            errors.append(f"clinical-case response is missing **Scenario:** in Case {idx}")
+        if not has_questions:
+            errors.append(f"clinical-case response is missing **Questions:** in Case {idx}")
+        if not has_model_answer:
+            errors.append(f"clinical-case response is missing **Model Answer:** in Case {idx}")
     return errors
 
 
-def _long_case_answer_errors(answer: str) -> list[str]:
-    for case_block in answer.split("> [!TIP]")[1:]:
-        model_answer = case_block.partition("> **Model Answer (Short):**")[2]
-        if len(model_answer.strip()) > 1_200:
+def _long_case_answer_errors(answer: str, base_characters: int = 2_500) -> list[str]:
+    for case_block in _case_blocks(answer):
+        questions_text = _field_content(case_block, "Questions")
+        sub_parts = len(re.findall(r"(?:^|\n)\s*(?:\d+[\.)]|[a-e][\.)])", questions_text))
+        max_chars = base_characters + (max(0, sub_parts - 1) * 1_000)
+        model_answer = _model_answer_content(case_block)
+        if not model_answer:
+            if "**Model Answer:**" in case_block:
+                model_answer = case_block.partition("**Model Answer:**")[2]
+            elif "**Model Answer (Short):**" in case_block:
+                model_answer = case_block.partition("**Model Answer (Short):**")[2]
+            elif "> **Model Answer:**" in case_block:
+                model_answer = case_block.partition("> **Model Answer:**")[2]
+            elif "> **Model Answer (Short):**" in case_block:
+                model_answer = case_block.partition("> **Model Answer (Short):**")[2]
+        if len(model_answer.strip()) > max_chars:
             return ["one or more clinical-case answers is not concise"]
     return []
 
@@ -4925,14 +5236,15 @@ def validate_cases(
 ) -> list[str]:
     answer = query_result.answer
     errors = _body_heading_errors(answer)
-    errors += _callout_errors(answer, {"TIP"})
+    errors += _callout_errors(answer, {"TIP", "NOTE", "IMPORTANT", "WARNING", "CAUTION"})
     errors += _badge_errors(answer, set(evidence.year_map))
     errors += _case_source_errors(query_result, evidence)
-    case_count = answer.count("> [!TIP]")
+    case_blocks = _case_blocks(answer)
+    case_count = len(case_blocks)
     if case_count < 2:
-        errors.append("clinical-case response must contain at least two TIP blocks")
+        errors.append("clinical-case response must contain at least two clinical cases")
     errors += _case_field_errors(answer, case_count)
-    if _unquoted_case_line(answer):
+    if "> [!TIP]" in answer and _unquoted_case_line(answer):
         errors.append("a clinical-case line is outside its TIP quote block")
     return errors + _long_case_answer_errors(answer)
 
@@ -4988,6 +5300,16 @@ def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
             sections.cases,
         )
     ]
+    if cleaned_sections[2].strip() and cleaned_sections[2].strip() != NO_MCQS:
+        cleaned_sections[2] = deduplicate_question_section(cleaned_sections[2], "MCQ")
+    if cleaned_sections[3].strip() and cleaned_sections[3].strip() != NO_WRITTEN:
+        cleaned_sections[3] = deduplicate_question_section(cleaned_sections[3], "Question")
+    if cleaned_sections[4].strip():
+        cleaned_cases = []
+        for case_block in _case_blocks(cleaned_sections[4]):
+            cleaned_cases.append(_normalize_case_block(case_block))
+        if cleaned_cases:
+            cleaned_sections[4] = "\n\n".join(cleaned_cases)
     cleaned_sections[2] = _replace_empty_sentinel(
         cleaned_sections[2],
         NO_MCQS,
@@ -5045,7 +5367,7 @@ def finalize_student_document(
 ) -> str:
     """Require Agent editorial review before producing the student document."""
     reviewed = draft
-    for heading_prefix in ("MCQ", "Question"):
+    for heading_prefix in ("MCQ", "Question", "Clinical Case"):
         reviewed = deduplicate_question_section(
             reviewed, heading_prefix, {year: [] for year in verified_years}, evidence_catalog
         )
@@ -5793,6 +6115,7 @@ def _query_cases(context: PipelineContext) -> QueryResult:
                 context.identity.title,
                 context.source_manifest,
                 context.badge_instructions,
+                context.exam_style_profile,
             ),
             phase_name="Clinical Cases",
             validator=lambda query_result: validate_cases(
@@ -5809,6 +6132,12 @@ def _query_cases(context: PipelineContext) -> QueryResult:
             notebook_ids=tuple(
                 notebook.notebook_uuid
                 for notebook in (context.report.notebooks or (context.report.notebook,))
+            ),
+            normalizer=lambda result: normalize_question_result(
+                result,
+                "Clinical Case",
+                context.report.year_map,
+                context.evidence_catalog,
             ),
         )
     )
@@ -6161,7 +6490,11 @@ def _phase_validation_contract(
 def _recovery_response_path(request: RunRequest, run_dir: Path) -> Path:
     if not request.recovery_response:
         raise CheckpointError("No Agent recovery response was supplied")
-    response_path = Path(request.recovery_response).expanduser().resolve()
+    raw_path = Path(request.recovery_response).expanduser()
+    if raw_path.is_absolute():
+        response_path = raw_path.resolve()
+    else:
+        response_path = (run_dir / raw_path).resolve()
     try:
         response_path.relative_to(run_dir.resolve())
     except ValueError as error:
@@ -6348,8 +6681,8 @@ def _run_checkpointed_phases(
         checkpoint["resume_from"] = force_from
         _atomic_write_json(run_dir / "checkpoint.json", checkpoint)
     results: dict[str, str] = {}
-    query_functions = _phase_query_functions(context)
     forcing = False
+    pending_phases: list[str] = []
     for phase in PHASE_ORDER:
         if phase == force_from:
             forcing = True
@@ -6362,77 +6695,123 @@ def _run_checkpointed_phases(
                 print(f"[Resume] {PHASE_LABELS[phase]}: reused")
                 continue
         forcing = forcing or phase == force_from
-        replacement_rounds = 0
-        while True:
-            try:
-                results[phase] = _execute_checkpointed_phase(
-                    phase, query_functions[phase], run_dir, checkpoint
-                ).answer
-                break
-            except PhaseValidationError as error:
-                if (
-                    not error.source_quarantine
-                    or replacement_rounds >= MAX_SOURCE_REPLACEMENT_ROUNDS
-                ):
-                    raise
-                replacement_rounds += 1
-                print(
-                    f"[Recovery] {PHASE_LABELS[phase]} identified "
-                    f"{len(error.source_quarantine)} bad NotebookLM source(s); "
-                    "replacing them from local files"
-                )
+        pending_phases.append(phase)
+
+    if pending_phases:
+        checkpoint_lock = threading.Lock()
+
+        def _execute_phase_worker(phase: str) -> tuple[str, str | None, Exception | None]:
+            nonlocal context
+            query_func = _phase_query_functions(context)[phase]
+            replacement_rounds = 0
+            while True:
                 try:
-                    context, _replacements = _replace_quarantined_sources(
-                        request,
-                        context,
-                        error.source_quarantine,
-                        run_dir,
-                        checkpoint,
-                        phase,
-                    )
-                except (TranscriberError, OSError) as recovery_error:
-                    recovery_errors = [*error.errors, f"source replacement failed: {recovery_error}"]
-                    _save_phase_checkpoint(
-                        PhaseCheckpointUpdate(
-                            run_dir,
-                            checkpoint,
-                            phase,
-                            "failed",
-                            error.answer,
-                            tuple(recovery_errors),
-                            error.source_quarantine,
+                    with checkpoint_lock:
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(run_dir, checkpoint, phase, "running")
                         )
-                    )
-                    _write_recovery_bundle(
-                        RecoveryBundle(
-                            run_dir,
-                            phase,
-                            error.answer,
-                            tuple(recovery_errors),
-                            checkpoint,
-                            error.source_names,
-                            error.source_quarantine,
+                    query_result = query_func()
+                    with checkpoint_lock:
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(
+                                run_dir,
+                                checkpoint,
+                                phase,
+                                "validated",
+                                query_result.answer,
+                                source_quarantine=query_result.source_quarantine,
+                            )
                         )
-                    )
-                    raise PhaseValidationError(
-                        phase,
-                        recovery_errors,
-                        error.answer,
-                        error.source_names,
-                        error.source_quarantine,
-                    ) from recovery_error
-                refreshed_fingerprints = _phase_fingerprints(request, context)
-                checkpoint["phase_fingerprints"] = refreshed_fingerprints
-                checkpoint["source_manifest_hash"] = _json_hash(
-                    request.source_manifest or {}
-                )
-                _atomic_write_json(run_dir / "evidence_catalog.json", context.evidence_catalog)
-                _atomic_write_json(run_dir / "checkpoint.json", checkpoint)
-                query_functions = _phase_query_functions(context)
-                # The failed answer was never accepted.  Re-run this phase
-                # against the newly uploaded source IDs; later phases remain
-                # pending and will use the rebuilt context naturally.
-                continue
+                        print(f"[Checkpoint] {PHASE_LABELS[phase]} passed and checkpointed")
+                    return phase, query_result.answer, None
+                except PhaseValidationError as error:
+                    if error.source_quarantine and replacement_rounds < MAX_SOURCE_REPLACEMENT_ROUNDS:
+                        replacement_rounds += 1
+                        print(
+                            f"[Recovery] {PHASE_LABELS[phase]} identified "
+                            f"{len(error.source_quarantine)} bad NotebookLM source(s); "
+                            "replacing them from local files"
+                        )
+                        try:
+                            with checkpoint_lock:
+                                context, _replacements = _replace_quarantined_sources(
+                                    request,
+                                    context,
+                                    error.source_quarantine,
+                                    run_dir,
+                                    checkpoint,
+                                    phase,
+                                )
+                                query_func = _phase_query_functions(context)[phase]
+                            continue
+                        except (TranscriberError, OSError) as recovery_error:
+                            error = PhaseValidationError(
+                                phase,
+                                [*error.errors, f"source replacement failed: {recovery_error}"],
+                                error.answer,
+                                error.source_names,
+                                error.source_quarantine,
+                            )
+                    with checkpoint_lock:
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(
+                                run_dir,
+                                checkpoint,
+                                phase,
+                                "failed",
+                                error.answer,
+                                tuple(error.errors),
+                                error.source_quarantine,
+                            )
+                        )
+                        _write_recovery_bundle(
+                            RecoveryBundle(
+                                run_dir,
+                                phase,
+                                error.answer,
+                                tuple(error.errors),
+                                checkpoint,
+                                error.source_names,
+                                error.source_quarantine,
+                            )
+                        )
+                    return phase, None, error
+                except Exception as error:
+                    with checkpoint_lock:
+                        errors = [str(error)]
+                        source_quarantine = (
+                            error.source_quarantine if isinstance(error, NlmError) else ()
+                        )
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(
+                                run_dir,
+                                checkpoint,
+                                phase,
+                                "failed",
+                                errors=tuple(errors),
+                                source_quarantine=source_quarantine,
+                            )
+                        )
+                    return phase, None, error
+
+        max_workers = min(len(pending_phases), 5)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_phase = {
+                executor.submit(_execute_phase_worker, phase): phase
+                for phase in pending_phases
+            }
+            first_error: Exception | None = None
+            for future in concurrent.futures.as_completed(future_to_phase):
+                phase, answer, error = future.result()
+                if error:
+                    if not first_error:
+                        first_error = error
+                elif answer is not None:
+                    results[phase] = answer
+
+        if first_error:
+            raise first_error
+
     checkpoint["status"] = "completed"
     checkpoint["resume_from"] = None
     _atomic_write_json(run_dir / "checkpoint.json", checkpoint)

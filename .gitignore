@@ -1,39 +1,46 @@
-# This repository publishes the transcriber code, not medical course data.
+# Ignore everything by default
 *
 
+# Allow repository configuration and documentation
 !.gitignore
 !README.md
+!AGENTS.md
+!LICENSE
+!skills.sh.json
 
+# Allow skills directory
+!skills/
+!skills/**
+
+# Allow .agents directory
 !.agents/
-!.agents/skills/
-!.agents/skills/universal-transcriber/
-!.agents/skills/universal-transcriber/SKILL.md
-!.agents/skills/universal-transcriber/agents/
-!.agents/skills/universal-transcriber/agents/openai.yaml
-!.agents/skills/universal-transcriber/references/
-!.agents/skills/universal-transcriber/references/modules.md
-!.agents/skills/universal-transcriber/references/exam-style.md
-!.agents/skills/universal-transcriber/references/multi-agent.md
-!.agents/skills/universal-transcriber/scripts/
-!.agents/skills/universal-transcriber/scripts/batch_state.py
-!.agents/skills/universal-transcriber/scripts/run_transcription.py
-!.agents/skills/universal-transcriber/scripts/manage_modules.py
-!.agents/skills/universal-transcriber/scripts/module_registry.py
+!.agents/**
 
+# Allow test suite
 !tests/
-!tests/test_module_registry.py
-!tests/test_batch_state.py
-!tests/test_transcriber.py
-!tests/test_source_preparation.py
-!tests/test_source_sync.py
+!tests/**
 
+# Allow core package code only
 !universal_transcriber/
 universal_transcriber/*
 !universal_transcriber/universal_transcribe.py
 !universal_transcriber/source_preparation.py
 !universal_transcriber/source_sync.py
+!universal_transcriber/manage_notebook.py
+!universal_transcriber/build_docx.py
 !universal_transcriber/config.example.json
+!universal_transcriber/README.md
 
-# Derived OCR/conversion/compression artifacts are local cache only.
+# Ignore Python caches, temp files, and local run caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.orig
 .transcriber-cache/
 modules/**/.transcriber-cache/
+.pytest_cache/
+
+# Ignore local course data and modules
+modules/
+modules/**
+

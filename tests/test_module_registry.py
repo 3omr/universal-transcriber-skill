@@ -560,6 +560,42 @@ class ModuleRegistryTests(unittest.TestCase):
             with self.assertRaises(ModuleConfigError):
                 discover_modules(Path(temporary_directory))
 
+    def test_generate_auto_manifest_matches_slides_and_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            module_root = Path(temporary_directory) / "modules" / "toxo"
+            lecture_dir = module_root / "Lecture"
+            questions_dir = module_root / "Questions"
+            lecture_dir.mkdir(parents=True)
+            questions_dir.mkdir(parents=True)
+
+            (lecture_dir / "paracetamol.pdf").write_bytes(b"slide content")
+            (lecture_dir / "Paracetamol audio 1.mp3").write_bytes(b"audio 1")
+            (questions_dir / "End 2023.pdf").write_bytes(b"exam 2023")
+            (questions_dir / "Khalsa Question Bank.pdf").write_bytes(b"qbank")
+
+            manifest_path = launcher.generate_auto_manifest(module_root, "Paracetamol")
+            self.assertTrue(manifest_path.is_file())
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest_data["title"], "Paracetamol")
+            self.assertEqual(manifest_data["slides"]["path"], "Lecture/paracetamol.pdf")
+            self.assertIn("Paracetamol audio 1.mp3", manifest_data["recording_sources"])
+            self.assertEqual(len(manifest_data["assessment_sources"]), 2)
+
+            exam_item = next(
+                item for item in manifest_data["assessment_sources"]
+                if item["path"] == "Questions/End 2023.pdf"
+            )
+            self.assertEqual(exam_item["type"], "past_exam")
+            self.assertEqual(exam_item["year"], 2023)
+
+            qbank_item = next(
+                item for item in manifest_data["assessment_sources"]
+                if item["path"] == "Questions/Khalsa Question Bank.pdf"
+            )
+            self.assertEqual(qbank_item["type"], "question_bank")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -11,9 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-ENGINE_PATH = (
-    Path(__file__).parents[1] / "universal_transcriber" / "universal_transcribe.py"
+SCRIPTS_DIR = (
+    Path(__file__).parents[1]
+    / "skills"
+    / "universal-transcriber"
+    / "scripts"
 )
+ENGINE_PATH = SCRIPTS_DIR / "universal_transcribe.py"
 SPEC = importlib.util.spec_from_file_location("test_transcriber_engine", ENGINE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Could not load the transcriber engine")
@@ -645,7 +649,7 @@ class TranscriberTests(unittest.TestCase):
             checkpoint = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
             repaired_file_exists = (run_dir / "phase-written.repaired.md").is_file()
 
-        self.assertEqual(sections.written, "### Question 1 **[IMP]**\n\n**Question:** Enumerate the early complications.\n\n**Model Answer (Short):**\n- Airway obstruction.\n- Perforation.\n- Shock.")
+        self.assertEqual(sections.written, "### Question 1 **[IMP]**\n\n**Question:** Enumerate the early complications.\n\n**Model Answer:**\n- Airway obstruction.\n- Perforation.\n- Shock.")
         self.assertEqual(checkpoint["phases"]["written"], "repaired")
         self.assertEqual(checkpoint["status"], "completed")
         self.assertTrue(repaired_file_exists)
@@ -2322,5 +2326,121 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual(sources[0].role, "ignore")
 
 
+    def test_mcq_multiline_options_and_clean_fields(self) -> None:
+        answer = (
+            "### MCQ 1 **[Past Exams - 2022]**\n\n"
+            "**Question:** Main cause of death in hanging is:\n"
+            "**Options:** a. Reflex cardiac inhibition b. Asphyxia c. Cerebral anemia d. Tearing of the pons\n"
+            "**Source:** Exam 2022.pdf\n"
+            "**Correct Answer:** c. Cerebral anemia\n"
+            "**Clinical Explanation:** بالرغم من تصنيف الشنق كنوع من أنواع الـ Violent Asphyxia إلا أن السبب الرئيسي هو Cerebral anemia."
+        )
+        evidence = engine.QuestionEvidence(
+            {2022: ["Exam 2022.pdf"]},
+            ["Exam 2022.pdf"],
+            {"mcq": {"options": {"count": 4}}},
+        )
+        query_result = engine.QueryResult(
+            answer,
+            ["Exam 2022.pdf"],
+        )
+        errors = engine.validate_mcqs(query_result, evidence)
+        self.assertEqual(errors, [])
+
+        normalized = engine._normalize_mcq_block(answer)
+        self.assertIn("**Options:**\n- **a.** Reflex cardiac inhibition\n- **b.** Asphyxia\n- **c.** Cerebral anemia\n- **d.** Tearing of the pons", normalized)
+        self.assertIn("**Question:**", normalized)
+        self.assertIn("**Clinical Explanation:**", normalized)
+
+    def test_written_clean_fields_and_concise_english_model_answer(self) -> None:
+        answer = (
+            "### Question 1 **[Past Exams - 2022]**\n\n"
+            "**Question:** Define violent asphyxia and enumerate its main types.\n"
+            "**Source:** Exam 2022.pdf\n"
+            "**Model Answer:**\n"
+            "- **Definition:** Death resulting from mechanical interference with respiration by an external violent force.\n"
+            "- **Types:**\n"
+            "  1. Hanging\n"
+            "  2. Strangulation\n"
+            "  3. Throttling\n"
+            "  4. Suffocation (Smothering / Choking)\n"
+            "  5. Traumatic asphyxia\n"
+            "  6. Drowning\n"
+            "**Clinical Explanation:** الدكتور ركز على إن الأساس في التعريف هو الـ Mechanical interference."
+        )
+        evidence = engine.QuestionEvidence(
+            {2022: ["Exam 2022.pdf"]},
+            ["Exam 2022.pdf"],
+        )
+        query_result = engine.QueryResult(
+            answer,
+            ["Exam 2022.pdf"],
+        )
+        errors = engine.validate_written(query_result, evidence)
+        self.assertEqual(errors, [])
+
+        legacy_block = (
+            "### Question 1 **[Past Exams - 2022]**\n\n"
+            "**Question (verbatim):** Define violent asphyxia.\n"
+            "**Model Answer (Short):** Death from mechanical interference.\n"
+            "**Clinical Explanation (Egyptian Arabic):** شرح عربي."
+        )
+        normalized = engine._normalize_written_block(legacy_block)
+        self.assertIn("**Question:**", normalized)
+        self.assertIn("**Model Answer:**", normalized)
+        self.assertIn("**Clinical Explanation:**", normalized)
+        self.assertNotIn("(verbatim)", normalized)
+        self.assertNotIn("(Short)", normalized)
+        self.assertNotIn("(Egyptian Arabic)", normalized)
+
+    def test_clinical_cases_standard_headings_and_clean_format(self) -> None:
+        answer = (
+            "### Clinical Case 1 **[Past Exams - 2022]**\n\n"
+            "**Scenario:** A 19-year-old male is pulled out of fresh water canal.\n"
+            "**Questions:**\n"
+            "1. What is the diagnosis?\n"
+            "2. Explain the mechanism of death.\n"
+            "**Source:** Exam 2022.pdf\n"
+            "**Model Answer:**\n"
+            "1. Fresh water drowning.\n"
+            "2. Hemodilution and ventricular fibrillation.\n"
+            "**Clinical Explanation:** شرح الحالة بالعامية المصرية.\n\n"
+            "### Clinical Case 2 **[IMP]**\n\n"
+            "**Scenario:** A patient presents with acute organophosphate toxicity.\n"
+            "**Questions:**\n"
+            "1. Mention the antidote of choice.\n"
+            "**Model Answer:**\n"
+            "1. Atropine sulfate + Oximes (Pralidoxime).\n"
+            "**Clinical Explanation:** الأتروبين هو الـ Antidote الأساسي."
+        )
+        evidence = engine.CaseEvidence(
+            {2022: ["Exam 2022.pdf"]},
+            ["Exam 2022.pdf"],
+            ("lecture_recording.m4a",),
+        )
+        query_result = engine.QueryResult(
+            answer,
+            ["Exam 2022.pdf", "lecture_recording.m4a"],
+        )
+        errors = engine.validate_cases(query_result, evidence)
+        self.assertEqual(errors, [])
+
+        # Check normalization of legacy TIP callout
+        legacy_tip = (
+            "> [!TIP]\n"
+            "> **🩺 Clinical Case 1:** **[IMP]**\n"
+            "> **Scenario:** A patient with carbon monoxide poisoning.\n"
+            "> **Questions:** 1. Diagnosis?\n"
+            "> **Model Answer (Short):** 1. CO poisoning.\n"
+            "> **Clinical Explanation (Egyptian Arabic):** شرح."
+        )
+        normalized_case = engine._normalize_case_block(legacy_tip)
+        self.assertTrue(normalized_case.startswith("### Clinical Case 1 **[IMP]**"))
+        self.assertNotIn("> [!TIP]", normalized_case)
+        self.assertIn("**Model Answer:**", normalized_case)
+        self.assertNotIn("(Short)", normalized_case)
+
+
 if __name__ == "__main__":
     unittest.main()
+

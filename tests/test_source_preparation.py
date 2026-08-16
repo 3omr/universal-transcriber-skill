@@ -1,11 +1,20 @@
 import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from universal_transcriber.source_preparation import (
+SCRIPTS_DIR = (
+    Path(__file__).parents[1]
+    / "skills"
+    / "universal-transcriber"
+    / "scripts"
+)
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+from source_preparation import (
     _ocr_pdf,
     automatic_preparation_manifest,
     prepare_manifest_sources,
@@ -41,10 +50,10 @@ class SourcePreparationTests(unittest.TestCase):
             destination = Path(temporary_directory) / "scan-ocr.pdf"
             source.write_bytes(b"pdf")
             with patch(
-                "universal_transcriber.source_preparation.shutil.which",
+                "source_preparation.shutil.which",
                 return_value="ocrmypdf",
             ), patch(
-                "universal_transcriber.source_preparation.subprocess.run",
+                "source_preparation.subprocess.run",
                 side_effect=capture_tool,
             ):
                 _ocr_pdf(source, destination, "eng+ara")
