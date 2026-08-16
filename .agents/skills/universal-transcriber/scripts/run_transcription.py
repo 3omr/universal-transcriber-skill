@@ -658,10 +658,7 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
                 matched_audio.append(audio.name)
 
     if not matched_audio:
-        if best_slide and best_slide not in book_files:
-            matched_audio = [best_slide.name]
-        else:
-            matched_audio = [f"{query_stem}.mp3"]
+        matched_audio = [f"{query_stem}.mp3"]
 
     slide_path = f"Lecture/{best_slide.name}" if best_slide else f"Lecture/{query_stem}.pdf"
 
