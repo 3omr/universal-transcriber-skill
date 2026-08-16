@@ -545,13 +545,69 @@ def _manifest_references(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(normalized)
 
 
+TOPIC_SYNONYMS: dict[str, str] = {
+    "metal": "معادن",
+    "heavy metal": "معادن",
+    "heavy metals": "معادن",
+    "metals": "معادن",
+    "lead": "معادن",
+    "arsenic": "معادن",
+    "mercury": "معادن",
+    "aspirin": "acetyl salysilic",
+    "salicylate": "acetyl salysilic",
+    "paracetamol": "paracetamol",
+    "panadol": "paracetamol",
+    "acetaminophen": "paracetamol",
+    "corrosive": "corrosives",
+    "corrosives": "corrosives",
+    "acid": "corrosives",
+    "alkali": "corrosives",
+    "addiction": "addication",
+    "dependence": "addication",
+    "narcotic": "addication",
+    "volatile": "kerosin",
+    "hydrocarbon": "kerosin",
+    "kerosene": "kerosin",
+    "alcohol": "alcohol",
+    "gas": "gaseous",
+    "gaseous": "gaseous",
+    "carbon monoxide": "gaseous",
+    "snake": "animal",
+    "scorpion": "animal",
+    "viper": "animal",
+    "plant": "plant",
+    "atropine": "plant",
+    "food": "food poisoning",
+    "botulism": "food poisoning",
+    "favism": "food poisoning",
+    "psychotropic": "psychotropic",
+    "antidepressant": "psychotropic",
+}
+
+
 def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
     lecture_dir = module_root / "Lecture"
     questions_dir = module_root / "Questions"
     query_clean = lecture_query.strip()
-    query_tokens = [tok for tok in re.findall(r"\w+", query_clean.casefold()) if len(tok) > 1]
+    query_stem = re.sub(
+        r"\.(mp3|m4a|wav|aac|ogg|pdf|pptx|ppsx)$", "", query_clean, flags=re.IGNORECASE
+    ).strip()
+    query_tokens = [
+        tok
+        for tok in re.findall(r"\w+", query_stem.casefold())
+        if len(tok) > 1 and tok not in {"د", "دكتور", "dr", "part", "lecture", "1", "2", "3"}
+    ]
+
+    synonym_targets: list[str] = []
+    for tok in query_tokens:
+        if tok in TOPIC_SYNONYMS:
+            synonym_targets.append(TOPIC_SYNONYMS[tok].casefold())
+    for phrase, target in TOPIC_SYNONYMS.items():
+        if phrase in query_stem.casefold():
+            synonym_targets.append(target.casefold())
 
     slide_files: list[Path] = []
+    book_files: list[Path] = []
     audio_files: list[Path] = []
     if lecture_dir.is_dir():
         for item in sorted(lecture_dir.iterdir()):
@@ -559,40 +615,55 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
                 continue
             suffix = item.suffix.lower()
             if suffix in {".pptx", ".pdf", ".ppsx", ".ppt", ".docx"}:
-                slide_files.append(item)
+                if item.stem.casefold() in {"book", "textbook", "reference"}:
+                    book_files.append(item)
+                else:
+                    slide_files.append(item)
             elif suffix in {".mp3", ".m4a", ".wav", ".aac", ".ogg"}:
                 audio_files.append(item)
 
     def score_match(name: str) -> int:
         name_lower = name.casefold()
         score = 0
-        if query_clean.casefold() in name_lower:
+        if query_stem.casefold() in name_lower or name_lower in query_stem.casefold():
             score += 50
         for tok in query_tokens:
-            if tok in name_lower:
-                score += 10
+            if tok in name_lower or name_lower in tok:
+                score += 20
+            elif len(tok) >= 5 and (tok[:5] in name_lower or name_lower[:5] in tok):
+                score += 15
+        for syn in synonym_targets:
+            if syn in name_lower or name_lower in syn:
+                score += 30
         return score
 
     best_slide = None
-    best_slide_score = -1
+    best_slide_score = 0
     for slide in slide_files:
         score = score_match(slide.name)
         if score > best_slide_score:
             best_slide_score = score
             best_slide = slide
 
+    # Fallback to book file if no specific slide was matched
+    if not best_slide and book_files:
+        best_slide = book_files[0]
+
     matched_audio: list[str] = []
-    for audio in audio_files:
-        if score_match(audio.name) > 0:
-            matched_audio.append(audio.name)
+    if query_clean.lower().endswith((".mp3", ".m4a", ".wav", ".aac", ".ogg")):
+        matched_audio = [query_clean]
+    else:
+        for audio in audio_files:
+            if score_match(audio.name) > 0:
+                matched_audio.append(audio.name)
 
     if not matched_audio:
-        if best_slide:
+        if best_slide and best_slide not in book_files:
             matched_audio = [best_slide.name]
         else:
-            matched_audio = [f"{query_clean}.pdf"]
+            matched_audio = [f"{query_stem}.mp3"]
 
-    slide_path = f"Lecture/{best_slide.name}" if best_slide else f"Lecture/{query_clean}.pdf"
+    slide_path = f"Lecture/{best_slide.name}" if best_slide else f"Lecture/{query_stem}.pdf"
 
     assessment_sources: list[dict[str, Any]] = []
     if questions_dir.is_dir():
@@ -860,9 +931,14 @@ def _execute_selected(
     if not selected:
         print(f"All recordings in module '{context.module.module_id}' are transcribed.")
         return 0
-    for recording in selected:
-        with _lecture_lock(context.module, recording, manifest):
-            exit_code = _execute_recording(args, context, recording, manifest)
+    for i, recording in enumerate(selected, 1):
+        recording_manifest = manifest
+        if recording_manifest is None:
+            auto_manifest_path = generate_auto_manifest(context.module.paths.root, recording.title)
+            recording_manifest = _source_manifest(str(auto_manifest_path))
+            print(f"\n[Batch {i}/{len(selected)}] >>> Generated Auto-Manifest for: {recording.title}")
+        with _lecture_lock(context.module, recording, recording_manifest):
+            exit_code = _execute_recording(args, context, recording, recording_manifest)
             if exit_code != 0:
                 return exit_code
     return 0
@@ -899,6 +975,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-manifest",
         help="Automatically generate a complete manifest for the given lecture name/keyword",
+    )
+    parser.add_argument(
+        "--transcribe-all-pending",
+        action="store_true",
+        help="Automatically discover and transcribe all pending untranscribed lectures in the module",
     )
     parser.add_argument(
         "--apply",
@@ -1027,7 +1108,14 @@ def main() -> int:
             if args.source_manifest
             else None
         )
-        if manifest:
+        if args.transcribe_all_pending:
+            if args.lecture or args.source_manifest or args.auto_manifest:
+                raise LauncherError(
+                    "--transcribe-all-pending cannot be combined with --lecture, --source-manifest, or --auto-manifest"
+                )
+            selected = pending
+            manifest = None
+        elif manifest:
             if args.lecture or args.all or args.slides:
                 raise LauncherError(
                     "--source-manifest cannot be combined with --lecture, "
@@ -1042,7 +1130,7 @@ def main() -> int:
             if not args.audit_only:
                 raise LauncherError(
                     "A source manifest is required for a real transcription; "
-                    "run --audit-only first and pass --source-manifest"
+                    "pass --auto-manifest, --transcribe-all-pending, or --source-manifest"
                 )
             selected = _selected_recordings(_selection(args, context, recordings))
         if not args.audit_only:

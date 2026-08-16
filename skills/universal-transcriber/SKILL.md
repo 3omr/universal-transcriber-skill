@@ -65,10 +65,15 @@ You can either use the **automatic manifest generator** (`--auto-manifest "<lect
 Run the launcher in draft mode to execute preparation (conversions/OCR), upload necessary files, query NotebookLM concurrently across all 5 sections, and produce an evidence-rich `.draft.md`:
 
 ```bash
-# Using Auto-Manifest (Fastest & Simplest):
+# Using Auto-Manifest (Fastest for single lecture):
 python3 skills/universal-transcriber/scripts/run_transcription.py \
   --workspace "$PWD" --module <module_id> \
   --auto-manifest "<lecture_name>" --draft-only
+
+# Or Transcribing ALL Pending Lectures in the Module in Batch:
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> \
+  --transcribe-all-pending --draft-only
 
 # Or using Custom Manifest:
 python3 skills/universal-transcriber/scripts/run_transcription.py \
