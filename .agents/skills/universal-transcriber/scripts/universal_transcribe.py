@@ -3869,10 +3869,15 @@ review instead of merging them.
 
 For every item use ### Question N with badge(s), then **Question:**,
 **Source:** (if past exam/question bank), **Model Answer:**, and **Clinical Explanation:**.
-Model Answer must be in English only and strictly concise short answers grounded in the sources:
-use structured sub-bullets (each enumerated item on its own line) for lists, one short mechanism
-sentence for Give Reason, and a compact Markdown table for Compare.
-Clinical Explanation must be in Egyptian Arabic explaining key concepts, clinical rationale, and doctor emphasis.
+Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
+- For lists, blanks, and enumerations (e.g. 1... 2... 3...): provide only numbered concise keywords:
+  1- Concise keyword 1
+  2- Concise keyword 2
+  3- Concise keyword 3
+- For Give Reason: one concise clause (e.g. Due to inhibition of Cytochrome Oxidase).
+- For Compare: a compact Markdown table containing concise keywords.
+- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
+Clinical Explanation must be in Egyptian Arabic explaining the detailed clinical reasoning, mechanisms, and doctor emphasis.
 Run an editorial OCR pass before returning: repair split letters and joined words only when the source
 supports the repair, remove NotebookLM citation markers, and flag unresolved wording instead of
 guessing. No introduction, conclusion, or filler. If no grounded written
@@ -3898,8 +3903,11 @@ the profile shows that pattern.
 
 For every item use ### Question N **[IMP]**, then **Question:**,
 **Model Answer:**, and **Clinical Explanation:**. Use no Source field or verbatim label.
-Answers must be concise and in English only: structured sub-bullets for lists (each enumerated item on its own line),
-one short mechanism sentence for Give Reason, and a compact Markdown table for Compare.
+Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
+- For lists, blanks, and enumerations: provide only numbered concise keywords (1- Keyword 1\n2- Keyword 2\n...).
+- For Give Reason: one concise clause.
+- For Compare: a compact Markdown table with concise keywords.
+- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
 Clinical Explanation must be in Egyptian Arabic explaining the clinical reasoning and exam pearls.
 Return section body only; never use # or ## headings. If no emphasized point supports a written question, return
 exactly {NO_WRITTEN}."""

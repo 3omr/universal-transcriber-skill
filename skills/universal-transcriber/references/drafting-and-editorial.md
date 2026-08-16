@@ -82,16 +82,16 @@ Structured short and long questions reflecting actual exam commands:
 ```markdown
 ### Question 1 **[Past Exams - 2023]**
 
-**Question:** Enumerate four causes of sudden cardiac death in young athletes:-
+**Question:** Outline the treatment of CO poisoning: 1...........2........3......4......
 
 **Model Answer:**
-1. **Hypertrophic Cardiomyopathy (HCM):** Most common cause; asymmetric septal hypertrophy leading to LVOT obstruction and ventricular arrhythmias.
-2. **Anomalous Coronary Artery Origin:** Compression of the anomalous vessel between the aorta and pulmonary artery during strenuous exertion.
-3. **Arrhythmogenic Right Ventricular Cardiomyopathy (ARVC):** Fibrofatty replacement of RV myocardium predisposing to fatal ventricular tachycardia.
-4. **Channelopathies (e.g., Congenital Long QT Syndrome, Brugada Syndrome):** Ion channel dysfunction triggering polymorphic VT or Torsades de Pointes.
+1- Fresh air / Prevent exposure
+2- 100% O2
+3- Hyperbaric oxygen (HBO)
+4- Supportive therapy
 
 **Clinical Explanation:**
-التفسير بالعامية المصرية: في الامتحانات بيحب يسأل عن أشهر أسباب الـ Sudden Cardiac Death في السن الصغير. الإجابة النموذجية لازم تبدأ بالـ HCM كأول وأهم سبب، مع ذكر السبب الميكانيكي لكل نقطة باختصار.
+التفسير بالعامية المصرية: في الامتحانات المصرية بيحب إجابات الكلمات المفتاحية المختصرة (Keywords). الخطوات بتبدأ فوراً بإبعاد المريض عن مصدر الغاز، ثم إعطاؤه أكسجين 100%، واستخدام كبسولة الأكسجين المضغوط (HBO) في الحالات الشديدة، وأخيراً العلاج التدعيمي لمضاعفات المخ والرئة.
 ```
 
 ---
