@@ -11,9 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-ENGINE_PATH = (
-    Path(__file__).parents[1] / "universal_transcriber" / "universal_transcribe.py"
+SCRIPTS_DIR = (
+    Path(__file__).parents[1]
+    / "skills"
+    / "universal-transcriber"
+    / "scripts"
 )
+ENGINE_PATH = SCRIPTS_DIR / "universal_transcribe.py"
 SPEC = importlib.util.spec_from_file_location("test_transcriber_engine", ENGINE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Could not load the transcriber engine")

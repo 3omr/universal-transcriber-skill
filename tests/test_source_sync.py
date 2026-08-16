@@ -1,12 +1,21 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from universal_transcriber import source_sync
-from universal_transcriber import universal_transcribe as engine
-from universal_transcriber.source_sync import (
+SCRIPTS_DIR = (
+    Path(__file__).parents[1]
+    / "skills"
+    / "universal-transcriber"
+    / "scripts"
+)
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import source_sync
+import universal_transcribe as engine
+from source_sync import (
     SourceSyncRequest,
     SourceSyncError,
     apply_source_sync,

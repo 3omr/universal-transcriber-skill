@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import fcntl
 import hashlib
 import json
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -146,6 +148,34 @@ JOINED_COMMON_WORD_PATTERN = re.compile(
     r"[A-Za-z]{3,}\b",
     flags=re.IGNORECASE,
 )
+MEDICAL_OCR_ALLOWLIST = frozenset({
+    "amphetamine",
+    "amfetamine",
+    "anaesthesia",
+    "anesthesia",
+    "catheter",
+    "chemotherapy",
+    "chlorpromazine",
+    "deferoxamine",
+    "dexamethasone",
+    "diethylcarbamazine",
+    "dimercaprol",
+    "erythema",
+    "hyperthermia",
+    "hypothermia",
+    "hypothalamus",
+    "methane",
+    "neostigmine",
+    "noradrenaline",
+    "physostigmine",
+    "polyurethane",
+    "pralidoxime",
+    "promethazine",
+    "pyridostigmine",
+    "quadrant",
+    "radiotherapy",
+    "succimer",
+})
 NOTEBOOK_CITATION_PATTERN = re.compile(
     r"\[\s*\d+(?:\s*[,،、;\-–—]\s*\d+)*\s*\]"
 )
@@ -4015,15 +4045,15 @@ def validate_imp(query_result: QueryResult) -> list[str]:
 
 def _section_blocks(answer: str, heading_prefix: str) -> list[str]:
     if heading_prefix in ("Clinical Case", "Case"):
-        pattern = r"(?ms)^(?:### (?:Clinical )?Case\s+\d+|>\s*\*\*🩺 Clinical Case \d+:?\*\*).*?(?=(?:^### (?:Clinical )?Case\s+\d+|^>\s*\*\*🩺 Clinical Case \d+:?\*\*|\Z))"
+        pattern = r"(?ms)^(?:[ \t]*>[ \t]*)?(?:### (?:Clinical )?Case\s+\d+|>\s*\*\*🩺 Clinical Case \d+:?\*\*).*?(?=(?:^(?:[ \t]*>[ \t]*)?### (?:Clinical )?Case\s+\d+|^>\s*\*\*🩺 Clinical Case \d+:?\*\*|\Z))"
         blocks = re.findall(pattern, answer)
         if blocks:
             return blocks
         if "> [!TIP]" in answer:
             return [b.strip() for b in answer.split("> [!TIP]") if b.strip()]
-        pattern = rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)"
+        pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |\Z))"
         return re.findall(pattern, answer)
-    pattern = rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)"
+    pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |\Z))"
     return re.findall(pattern, answer)
 
 
@@ -4036,8 +4066,22 @@ def _source_field_matches(block: str, evidence_sources: list[str]) -> bool:
     )
 
 
+def _clean_source_field_item(item: str) -> str:
+    cleaned = item.strip().strip("'\"`")
+    cleaned = re.sub(r"\s*\(\d{4}\)$", "", cleaned).strip().strip("'\"`")
+    return cleaned
+
+
 def _source_fields(block: str) -> list[str]:
-    return re.findall(r"^(?:> )?\*\*Source:\*\*\s*(.+)$", block, re.MULTILINE)
+    raw_lines = re.findall(r"^(?:[ \t]*>[ \t]*)?\*\*Source:\*\*\s*(.+)$", block, re.MULTILINE)
+    items: list[str] = []
+    for line in raw_lines:
+        parts = re.split(r"\s+and\s+|\s*,\s*", line)
+        for part in parts:
+            cleaned = _clean_source_field_item(part)
+            if cleaned:
+                items.append(cleaned)
+    return items
 
 
 def _catalog_matches(
@@ -4473,7 +4517,13 @@ def _merged_badges(
 
 
 def _normalize_mcq_block(block: str) -> str:
-    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", block)
+    lines = block.splitlines()
+    cleaned_lines = [
+        line[2:] if line.startswith("> ") else line[1:] if line.startswith(">") else line
+        for line in lines
+    ]
+    text = "\n".join(cleaned_lines).strip()
+    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", text)
     text = re.sub(r"\*\*Options\s*(?:\(verbatim\))?:\*\*", "**Options:**", text)
     text = re.sub(
         r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
@@ -4494,7 +4544,13 @@ def _normalize_mcq_block(block: str) -> str:
 
 
 def _normalize_written_block(block: str) -> str:
-    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", block)
+    lines = block.splitlines()
+    cleaned_lines = [
+        line[2:] if line.startswith("> ") else line[1:] if line.startswith(">") else line
+        for line in lines
+    ]
+    text = "\n".join(cleaned_lines).strip()
+    text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", text)
     text = re.sub(r"\*\*Model Answer\s*(?:\(Short\))?:\*\*", "**Model Answer:**", text)
     text = re.sub(
         r"\*\*Clinical Explanation\s*(?:\(Egyptian Arabic\))?:\*\*",
@@ -4722,14 +4778,27 @@ def _option_keys(options: str) -> list[str]:
     return list(_option_entries(options))
 
 
+def _clean_option_text(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^(?:[ \t*>-]|\*\*)+", "", cleaned)
+    cleaned = re.sub(r"(?:\s*\*\*)+$", "", cleaned)
+    return cleaned.strip()
+
+
 def _option_entries(options: str) -> dict[str, str]:
+    cleaned_options = re.sub(r"(?m)^[ \t]*>[ \t]?", "", options)
     markers = list(
-        re.finditer(r"(?<![A-Za-z0-9])(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*", options)
+        re.finditer(
+            r"(?<![A-Za-z0-9])(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*(?:\*\*)?",
+            cleaned_options,
+        )
     )
     return {
-        marker.group(1).casefold(): options[marker.end() : next_start].strip()
+        marker.group(1).casefold(): _clean_option_text(
+            cleaned_options[marker.end() : next_start]
+        )
         for marker, next_start in zip(
-            markers, [*(_match.start() for _match in markers[1:]), len(options)]
+            markers, [*(_match.start() for _match in markers[1:]), len(cleaned_options)]
         )
     }
 
@@ -4748,8 +4817,11 @@ def _ocr_quality_errors(text: str, field_name: str) -> list[str]:
         errors.append(f"{field_name} contains NotebookLM citation residue")
     if BROKEN_OCR_TOKEN_PATTERN.search(text):
         errors.append(f"{field_name} contains broken OCR word spacing")
-    if JOINED_COMMON_WORD_PATTERN.search(text):
-        errors.append(f"{field_name} contains joined OCR words")
+    for match in JOINED_COMMON_WORD_PATTERN.finditer(text):
+        token = match.group(0).casefold()
+        if token not in MEDICAL_OCR_ALLOWLIST:
+            errors.append(f"{field_name} contains joined OCR words")
+            break
     return errors
 
 
@@ -4777,6 +4849,7 @@ def _correct_answer_errors(
     block: str, block_number: int, options: str
 ) -> list[str]:
     answer = _field_content(block, "Correct Answer")
+    answer = re.sub(r"(?m)^[ \t]*>[ \t]?", "", answer).strip()
     match = re.match(r"(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*", answer)
     if not match:
         return [f"MCQ {block_number} Correct Answer must start with an option label"]
@@ -6570,8 +6643,8 @@ def _run_checkpointed_phases(
         checkpoint["resume_from"] = force_from
         _atomic_write_json(run_dir / "checkpoint.json", checkpoint)
     results: dict[str, str] = {}
-    query_functions = _phase_query_functions(context)
     forcing = False
+    pending_phases: list[str] = []
     for phase in PHASE_ORDER:
         if phase == force_from:
             forcing = True
@@ -6584,77 +6657,123 @@ def _run_checkpointed_phases(
                 print(f"[Resume] {PHASE_LABELS[phase]}: reused")
                 continue
         forcing = forcing or phase == force_from
-        replacement_rounds = 0
-        while True:
-            try:
-                results[phase] = _execute_checkpointed_phase(
-                    phase, query_functions[phase], run_dir, checkpoint
-                ).answer
-                break
-            except PhaseValidationError as error:
-                if (
-                    not error.source_quarantine
-                    or replacement_rounds >= MAX_SOURCE_REPLACEMENT_ROUNDS
-                ):
-                    raise
-                replacement_rounds += 1
-                print(
-                    f"[Recovery] {PHASE_LABELS[phase]} identified "
-                    f"{len(error.source_quarantine)} bad NotebookLM source(s); "
-                    "replacing them from local files"
-                )
+        pending_phases.append(phase)
+
+    if pending_phases:
+        checkpoint_lock = threading.Lock()
+
+        def _execute_phase_worker(phase: str) -> tuple[str, str | None, Exception | None]:
+            nonlocal context
+            query_func = _phase_query_functions(context)[phase]
+            replacement_rounds = 0
+            while True:
                 try:
-                    context, _replacements = _replace_quarantined_sources(
-                        request,
-                        context,
-                        error.source_quarantine,
-                        run_dir,
-                        checkpoint,
-                        phase,
-                    )
-                except (TranscriberError, OSError) as recovery_error:
-                    recovery_errors = [*error.errors, f"source replacement failed: {recovery_error}"]
-                    _save_phase_checkpoint(
-                        PhaseCheckpointUpdate(
-                            run_dir,
-                            checkpoint,
-                            phase,
-                            "failed",
-                            error.answer,
-                            tuple(recovery_errors),
-                            error.source_quarantine,
+                    with checkpoint_lock:
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(run_dir, checkpoint, phase, "running")
                         )
-                    )
-                    _write_recovery_bundle(
-                        RecoveryBundle(
-                            run_dir,
-                            phase,
-                            error.answer,
-                            tuple(recovery_errors),
-                            checkpoint,
-                            error.source_names,
-                            error.source_quarantine,
+                    query_result = query_func()
+                    with checkpoint_lock:
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(
+                                run_dir,
+                                checkpoint,
+                                phase,
+                                "validated",
+                                query_result.answer,
+                                source_quarantine=query_result.source_quarantine,
+                            )
                         )
-                    )
-                    raise PhaseValidationError(
-                        phase,
-                        recovery_errors,
-                        error.answer,
-                        error.source_names,
-                        error.source_quarantine,
-                    ) from recovery_error
-                refreshed_fingerprints = _phase_fingerprints(request, context)
-                checkpoint["phase_fingerprints"] = refreshed_fingerprints
-                checkpoint["source_manifest_hash"] = _json_hash(
-                    request.source_manifest or {}
-                )
-                _atomic_write_json(run_dir / "evidence_catalog.json", context.evidence_catalog)
-                _atomic_write_json(run_dir / "checkpoint.json", checkpoint)
-                query_functions = _phase_query_functions(context)
-                # The failed answer was never accepted.  Re-run this phase
-                # against the newly uploaded source IDs; later phases remain
-                # pending and will use the rebuilt context naturally.
-                continue
+                        print(f"[Checkpoint] {PHASE_LABELS[phase]} passed and checkpointed")
+                    return phase, query_result.answer, None
+                except PhaseValidationError as error:
+                    if error.source_quarantine and replacement_rounds < MAX_SOURCE_REPLACEMENT_ROUNDS:
+                        replacement_rounds += 1
+                        print(
+                            f"[Recovery] {PHASE_LABELS[phase]} identified "
+                            f"{len(error.source_quarantine)} bad NotebookLM source(s); "
+                            "replacing them from local files"
+                        )
+                        try:
+                            with checkpoint_lock:
+                                context, _replacements = _replace_quarantined_sources(
+                                    request,
+                                    context,
+                                    error.source_quarantine,
+                                    run_dir,
+                                    checkpoint,
+                                    phase,
+                                )
+                                query_func = _phase_query_functions(context)[phase]
+                            continue
+                        except (TranscriberError, OSError) as recovery_error:
+                            error = PhaseValidationError(
+                                phase,
+                                [*error.errors, f"source replacement failed: {recovery_error}"],
+                                error.answer,
+                                error.source_names,
+                                error.source_quarantine,
+                            )
+                    with checkpoint_lock:
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(
+                                run_dir,
+                                checkpoint,
+                                phase,
+                                "failed",
+                                error.answer,
+                                tuple(error.errors),
+                                error.source_quarantine,
+                            )
+                        )
+                        _write_recovery_bundle(
+                            RecoveryBundle(
+                                run_dir,
+                                phase,
+                                error.answer,
+                                tuple(error.errors),
+                                checkpoint,
+                                error.source_names,
+                                error.source_quarantine,
+                            )
+                        )
+                    return phase, None, error
+                except Exception as error:
+                    with checkpoint_lock:
+                        errors = [str(error)]
+                        source_quarantine = (
+                            error.source_quarantine if isinstance(error, NlmError) else ()
+                        )
+                        _save_phase_checkpoint(
+                            PhaseCheckpointUpdate(
+                                run_dir,
+                                checkpoint,
+                                phase,
+                                "failed",
+                                errors=tuple(errors),
+                                source_quarantine=source_quarantine,
+                            )
+                        )
+                    return phase, None, error
+
+        max_workers = min(len(pending_phases), 5)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_phase = {
+                executor.submit(_execute_phase_worker, phase): phase
+                for phase in pending_phases
+            }
+            first_error: Exception | None = None
+            for future in concurrent.futures.as_completed(future_to_phase):
+                phase, answer, error = future.result()
+                if error:
+                    if not first_error:
+                        first_error = error
+                elif answer is not None:
+                    results[phase] = answer
+
+        if first_error:
+            raise first_error
+
     checkpoint["status"] = "completed"
     checkpoint["resume_from"] = None
     _atomic_write_json(run_dir / "checkpoint.json", checkpoint)

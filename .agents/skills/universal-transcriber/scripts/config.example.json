@@ -1,0 +1,14 @@
+{
+  "default_subject": "General",
+  "notebook_ids": {
+    "Toxicology": ["NOTEBOOK_UUID"]
+  },
+  "nlm_executable": "nlm",
+  "nlm_profile": null,
+  "modules_root": "modules",
+  "transcripts_root": "Transcripts",
+  "output_language": "Egyptian Arabic mixed with English medical terminology",
+  "emoji_by_subject": {
+    "General": "📚"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "groupings": [
+    {
+      "title": "Medical Lecture Transcription",
+      "description": "Autonomously transcribe medical lectures into structured study guides blending Egyptian Arabic with English terminology.",
+      "skills": [
+        "universal-transcriber"
+      ]
+    },
+    {
+      "title": "Setup & Configuration",
+      "description": "Configure medical modules, directory layouts, and NotebookLM project bindings.",
+      "skills": [
+        "transcriber-setup"
+      ]
+    }
+  ]
+}
