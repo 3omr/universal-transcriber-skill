@@ -3933,22 +3933,28 @@ Create 2-3 clinically relevant cases within the recording's taught scope.
 Study past exam patterns and observed question structures from the course to match:
 - The typical case scenario style and length
 - For cases sourced from past exams, reproduce all original sub-questions verbatim in their exact count, text, and sequence without omitting or shortening any sub-questions.
-- The exact question breakdown per case (e.g. 1. Diagnosis/Significance, 2. Mechanism/Investigations, 3. Management/Autopsy findings)
-- Clear, concise questions without filler
+- For newly synthesized cases, questions MUST strictly follow the standard Egyptian medical exam case breakdown matching the subject/specialty (e.g. 1. Diagnosis / Most likely diagnosis, 2. DDx (Differential diagnosis) or Pathognomonic Clinical Picture (CP), 3. Diagnostic Investigations / Lab tests, 4. Treatment (TTT) / Specific Antidote / Emergency management / Precautions). NEVER create long essay sub-questions (e.g. 'Explain the dual physiological mechanisms...').
+- Clear, concise, standard clinical exam questions without filler.
 
 For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
 ### Clinical Case N with evidence-backed badge(s)
 **Scenario:** concise clinical scenario
 **Questions:**
-1. concise numbered question 1
-2. concise numbered question 2
-3. concise numbered question 3
+1. What is the most likely diagnosis?
+2. What is the differential diagnosis (DDx) / characteristic clinical feature?
+3. Mention key diagnostic investigations.
+4. Outline the lines of treatment (TTT) / antidote.
 **Model Answer:**
-1. **Category/Heading:**
-   - Concise keyword answer 1 (1 to 5 words)
-   - Concise keyword answer 2
-2. **Category/Heading:**
-   - Concise keyword answer
+1. **Diagnosis:**
+   - Concise keyword answer (1 to 5 words)
+2. **DDx / Clinical Picture:**
+   - Concise keyword 1
+   - Concise keyword 2
+3. **Investigations:**
+   - Concise keyword
+4. **Treatment (TTT):**
+   - Concise keyword 1
+   - Concise keyword 2
 **Clinical Explanation:** Egyptian Arabic explanation covering comprehensive clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
 
 Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking scheme style, 1 to 5 words per point). NEVER write long sentences, descriptive narratives, or paragraphs inside Model Answer. Put all detailed medical explanations and lecture context exclusively in **Clinical Explanation** (in Egyptian Arabic).

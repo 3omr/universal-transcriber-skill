@@ -707,6 +707,16 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
             ],
             "answer_shape": "Numbered keywords matching requested count",
         },
+        "cases": {
+            "style": "Standard Egyptian medical exam case breakdown matching subject conventions",
+            "sub_questions_pattern": [
+                "1. Diagnosis (or Most likely diagnosis)",
+                "2. DDx (Differential diagnosis) or Characteristic Clinical Picture (CP)",
+                "3. Investigations / Confirmatory laboratory tests",
+                "4. Treatment / Management (TTT / Antidote / Emergency measures)",
+            ],
+            "answer_shape": "Ultra-concise keyword bullets under standard clinical headings (1 to 5 words per point)",
+        },
         "sample_scope": "Same college past exams and official question bank",
     }
 
