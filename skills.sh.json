@@ -9,6 +9,13 @@
       ]
     },
     {
+      "title": "Spaced Repetition & Flashcards",
+      "description": "Generate 100% English high-yield Anki flashcards (.apkg / .tsv) structured around written exam model answer formats.",
+      "skills": [
+        "transcriber-anki"
+      ]
+    },
+    {
       "title": "Setup & Configuration",
       "description": "Configure medical modules, directory layouts, and NotebookLM project bindings.",
       "skills": [

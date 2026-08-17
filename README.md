@@ -90,6 +90,7 @@ flowchart TD
 | Skill | Description | Location |
 | --- | --- | --- |
 | [`universal-transcriber`](skills/universal-transcriber/SKILL.md) | Transcribe lectures, generate grounded exam questions, and coordinate multi-agent workers. | `skills/universal-transcriber/` |
+| [`transcriber-anki`](skills/transcriber-anki/SKILL.md) | Generate high-yield, 100% English Anki flashcard decks (.apkg/.tsv) from transcripts. | `skills/transcriber-anki/` |
 | [`transcriber-setup`](skills/transcriber-setup/SKILL.md) | Configure new modules, initialize canonical directories, and link NotebookLM projects. | `skills/transcriber-setup/` |
 
 ---
