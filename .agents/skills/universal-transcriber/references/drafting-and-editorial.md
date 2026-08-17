@@ -141,3 +141,7 @@ Grounded clinical vignettes with all original exam sub-questions reproduced verb
 3. **Student-Facing Presentation**:
    - Hide internal NotebookLM source UUIDs, raw filenames, and internal hashes.
    - Retain all grounded year badges and evidence provenance.
+4. **Lecture Scope & Question Relevance Gate**:
+   - Cross-check every extracted question in MCQs, Written Questions, and Clinical Cases against the **Chronological Guide** and the lecture's **slides/PowerPoint**.
+   - If an exam question addresses a topic belonging to a separate chapter/lecture that was neither taught by the lecturer in the recording nor included in the slide deck (e.g. Firearm inlet/exit, powder marks, or bevelling appearing in a Mechanical/General Wounds transcript), **prune and delete** the question entirely from the draft.
+   - Re-index all remaining question numbers sequentially (`### MCQ 1`, `### MCQ 2`, ..., `### Question 1`, ..., `### Clinical Case 1`).

@@ -63,7 +63,7 @@ MAX_ASSESSMENT_QUERY_CHARS = 4000
 MAX_ASSESSMENT_STYLE_CHARS = 750
 MAX_ATTEMPTS = 3
 PROMPT_VERSION = "2026-08-12-question-recovery-v2"
-ASSESSMENT_PROMPT_VERSION = "2026-08-13-compact-query-v1"
+ASSESSMENT_PROMPT_VERSION = "2026-08-17-scope-filter-v1"
 VALIDATOR_VERSION = "2026-08-12-dynamic-years-v2"
 PHASE_ORDER = ("guide", "imp", "mcqs", "written", "cases")
 PHASE_LABELS = {
@@ -3785,6 +3785,7 @@ def build_mcq_prompt(
 
 {context}
 Extract every relevant MCQ from verified past-exam or question-bank sources.
+STRICT LECTURE SCOPE CONSTRAINT: Extract ONLY questions directly relevant to the specific topics, mechanisms, and clinical conditions taught in this lecture's recording and slides for '{title}'. EXCLUDE questions belonging to other chapters or separate lectures that were not taught in this lecture (e.g. do not extract firearm wound mechanics or distant topics in a general mechanical wounds lecture). If a question's topic was not taught in this lecture, omit it entirely.
 Preserve the original wording and meaning but
 repair obvious OCR damage (split letters, joined words, and broken option
 labels). This is OCR normalization, not rewriting: never modernize, paraphrase,
@@ -3853,8 +3854,9 @@ def build_written_prompt(
 
 {context}
 Extract every matching Essay, Short Note, Enumerate, Compare, Give Reason, or
-other written question from verified exam/question-bank sources. Preserve the
-source wording and meaning while repairing obvious OCR damage in the question
+other written question from verified exam/question-bank sources.
+STRICT LECTURE SCOPE CONSTRAINT: Extract ONLY questions directly relevant to the specific topics, classifications, and concepts taught in this lecture's recording and slides for '{title}'. EXCLUDE questions belonging to other lectures or separate chapters that were not taught in this lecture. If a question was not taught, omit it entirely.
+Preserve the source wording and meaning while repairing obvious OCR damage in the question
 text; do not paraphrase it into a new academic prompt.
 
 {badge_instructions}
@@ -3930,6 +3932,7 @@ def build_case_prompt(
 {style_context}
 
 Create 2-3 clinically relevant cases within the recording's taught scope.
+STRICT LECTURE SCOPE CONSTRAINT: Sourced cases and questions MUST strictly fall within the taught scope, conditions, and mechanisms of '{title}' (recording and slides). Do not include case vignettes for other distinct lectures.
 Study past exam patterns and observed question structures from the course to match:
 - The typical case scenario style and length
 - For cases sourced from past exams, reproduce all original sub-questions verbatim in their exact count, text, and sequence without omitting or shortening any sub-questions.

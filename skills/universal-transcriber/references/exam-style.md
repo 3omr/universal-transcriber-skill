@@ -115,3 +115,13 @@ Pass the observed profile inside the temporary source manifest:
 - **Automatic Safe Merge**: The engine merges identical or safely OCR-equivalent questions across exam years, combining years in ascending order:
   `### Question 1 **[Past Exams - 2021, 2022, 2023]**`
 - **Fast-Fail on Duplicate Discrepancies & Joined OCR**: When questions share a similar stem but differ in options/count, or when joined OCR words occur, the engine fast-fails immediately to Agent Recovery without repeating slow NotebookLM retry loops. The Agent normalizes and repairs questions directly.
+
+---
+
+## 7. Lecture Scope & Out-of-Scope Question Filtering
+
+- **Assessment Sourcing Scope**: Exam files uploaded to NotebookLM often encompass multiple lectures or the whole module curriculum.
+- **Filtering Obligation**: Grounded questions must be strictly filtered against what was taught in the selected lecture (audio recording and slide deck).
+- **Pruning Rule**:
+  - Reject questions matching general keywords that actually belong to distinct lectures (e.g. Firearms questions extracted into Mechanical Wounds).
+  - Delete out-of-scope questions and re-number the remaining items in Section 3 (MCQs), Section 4 (Written), and Section 5 (Cases).

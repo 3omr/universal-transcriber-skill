@@ -47,6 +47,9 @@ Use these exact terms. Do not paraphrase or coin synonyms.
    - In Written Questions and Clinical Cases, `Model Answer` must strictly consist of ultra-concise keywords and short phrases (Egyptian exam mark scheme style, 1–5 words per point/bullet). All detailed clinical explanations, physiology, and doctor's remarks belong exclusively in `Clinical Explanation` in Egyptian Arabic.
 9. **Subject-Aware Clinical Case Structure (Section 5)**:
    - Clinical Cases must strictly follow the standard Egyptian exam breakdown for the subject (1. Diagnosis & Severity, 2. DDx / Characteristic Clinical Picture, 3. Key Investigations / Lab tests, 4. Treatment / TTT / Antidote / Precautions). Never invent artificial narrative essay sub-questions.
+10. **Strict Question-to-Lecture Scope Alignment (Sections 3, 4 & 5)**:
+    - During editorial review, the Agent / Worker Agent must cross-check every extracted Past Exam and Question Bank item against Section 1 (Chronological Guide) and the lecture's slide deck.
+    - If an assessment question covers topics from another chapter or lecture that were neither explained by the doctor in the audio nor present in the slides (e.g. Firearm wounds in a Mechanical Wounds lecture), it must be pruned/deleted immediately. Questions in the transcript must test only the taught curriculum of that specific lecture. After pruning, re-index question numbers sequentially.
 
 ---
 

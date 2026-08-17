@@ -92,6 +92,7 @@ The draft runs sequentially through all five sections:
 Open and review the generated `.draft.md` before finalization:
 
 - **Chronological Guide**: Verify complete preservation of the doctor's spoken explanations, sequence, examples, and Egyptian Arabic dialogue. Never summarize or compress this section.
+- **Lecture Scope & Question Relevance**: Cross-check every extracted question in MCQs, Written, and Cases against the Chronological Guide and lecture slides. Delete any out-of-scope question that belongs to another lecture/chapter and was not taught in this lecture, then re-index the remaining questions sequentially.
 - **OCR Normalization & Duplicate Resolution**: Restore damaged characters or split option labels (`- **a.**`). Merge identical questions across years into single blocks with ascending badges (e.g. `**[Past Exams - 2021, 2022, 2023]**`). Do not rewrite source questions.
 - **Answer Alignment**: Confirm `Correct Answer` matches the option letter and that the clinical explanation aligns.
 - **Clean Single Copy**: Ensure redundant local files (e.g. unsupported `.ppsx` when `.pdf` is ready) and broken remote sources are deleted immediately so only one clean source exists both locally and on NotebookLM.
