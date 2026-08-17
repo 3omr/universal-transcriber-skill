@@ -881,6 +881,22 @@ class TranscriberTests(unittest.TestCase):
         self.assertIn("فاينال توكسو 2024.pdf", prompt)
         self.assertNotIn("REFERENCE ENRICHMENT POLICY", prompt)
 
+    def test_assessment_prompts_enforce_strict_lecture_scope(self) -> None:
+        report = phase0_report([], [])
+        report.year_map = {2023: ["Final 2023.pdf"]}
+        context = engine.build_assessment_source_context(report)
+        badge_inst = engine.canonical_badge_instructions(report.year_map)
+
+        mcq_prompt = engine.build_mcq_prompt("Wounds", context, badge_inst)
+        written_prompt = engine.build_written_prompt("Wounds", context, badge_inst)
+        case_prompt = engine.build_case_prompt("Wounds", context, badge_inst)
+
+        self.assertIn("STRICT LECTURE SCOPE CONSTRAINT", mcq_prompt)
+        self.assertIn("EXCLUDE questions belonging to other chapters", mcq_prompt)
+        self.assertIn("STRICT LECTURE SCOPE CONSTRAINT", written_prompt)
+        self.assertIn("EXCLUDE questions belonging to other lectures", written_prompt)
+        self.assertIn("STRICT LECTURE SCOPE CONSTRAINT", case_prompt)
+
     def test_generic_invalid_query_does_not_quarantine_healthy_sources(self) -> None:
         source_ids = ("source-one", "source-two")
         request = engine.NlmQueryRequest(
