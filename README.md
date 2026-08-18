@@ -1,7 +1,7 @@
 # Universal Medical Lecture Transcriber
 
 [![GitHub Release](https://img.shields.io/github/v/release/3omr/universal-transcriber-skill?color=blue&label=version)](https://github.com/3omr/universal-transcriber-skill/releases/latest)
-[![GitHub Downloads](https://img.shields.io/github/downloads/3omr/universal-transcriber-skill/total.svg?color=success)](https://github.com/3omr/universal-transcriber-skill/releases)
+[![Downloads](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/3omr/universal-transcriber-skill/main/.github/traffic/clones_badge.json&label=downloads)](https://github.com/3omr/universal-transcriber-skill)
 [![skills.sh](https://img.shields.io/badge/skills.sh-catalog-orange.svg)](skills.sh.json)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![GitHub Stars](https://img.shields.io/github/stars/3omr/universal-transcriber-skill?style=flat&color=yellow)](https://github.com/3omr/universal-transcriber-skill/stargazers)
