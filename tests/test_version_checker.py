@@ -24,19 +24,19 @@ import version_checker
 
 class TestVersionChecker(unittest.TestCase):
     def test_version_string_and_parse(self):
-        self.assertEqual(version_checker.get_current_version(), "1.1.0")
+        self.assertEqual(version_checker.get_current_version(), "1.2.0")
         self.assertEqual(version_checker.parse_version("1.0.0"), (1, 0, 0))
-        self.assertEqual(version_checker.parse_version("v1.1.0"), (1, 1, 0))
+        self.assertEqual(version_checker.parse_version("v1.2.0"), (1, 2, 0))
         self.assertEqual(version_checker.parse_version("V2.10.3"), (2, 10, 3))
         self.assertEqual(version_checker.parse_version("invalid"), (0,))
 
     def test_is_newer_version(self):
-        self.assertTrue(version_checker.is_newer_version("1.2.0", "1.1.0"))
+        self.assertTrue(version_checker.is_newer_version("1.3.0", "1.2.0"))
         self.assertTrue(version_checker.is_newer_version("2.0.0", "1.9.9"))
-        self.assertTrue(version_checker.is_newer_version("1.1.1", "1.1.0"))
-        self.assertFalse(version_checker.is_newer_version("1.1.0", "1.1.0"))
-        self.assertFalse(version_checker.is_newer_version("1.0.0", "1.1.0"))
-        self.assertFalse(version_checker.is_newer_version("0.9.0", "1.1.0"))
+        self.assertTrue(version_checker.is_newer_version("1.2.1", "1.2.0"))
+        self.assertFalse(version_checker.is_newer_version("1.2.0", "1.2.0"))
+        self.assertFalse(version_checker.is_newer_version("1.1.0", "1.2.0"))
+        self.assertFalse(version_checker.is_newer_version("0.9.0", "1.2.0"))
 
     def test_format_update_notice(self):
         notice = version_checker.format_update_notice("1.2.0", "1.1.0")
@@ -55,16 +55,16 @@ class TestVersionChecker(unittest.TestCase):
             
             # Write a valid cache with newer version
             cache_file.write_text(
-                json.dumps({"latest_version": "1.2.0", "checked_at": time.time()}),
+                json.dumps({"latest_version": "1.3.0", "checked_at": time.time()}),
                 encoding="utf-8",
             )
 
             result = version_checker.check_for_updates(workspace=workspace, cache_ttl=3600)
-            self.assertEqual(result, "1.2.0")
+            self.assertEqual(result, "1.3.0")
 
             # Write cache with same version
             cache_file.write_text(
-                json.dumps({"latest_version": "1.1.0", "checked_at": time.time()}),
+                json.dumps({"latest_version": "1.2.0", "checked_at": time.time()}),
                 encoding="utf-8",
             )
             result_same = version_checker.check_for_updates(workspace=workspace, cache_ttl=3600)
@@ -72,19 +72,19 @@ class TestVersionChecker(unittest.TestCase):
 
     @patch("version_checker.fetch_latest_release_from_github")
     def test_check_for_updates_network_fetch_and_cache(self, mock_fetch):
-        mock_fetch.return_value = "1.2.0"
+        mock_fetch.return_value = "1.3.0"
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             cache_dir = workspace / ".transcriber-cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             
             result = version_checker.check_for_updates(workspace=workspace, force=True)
-            self.assertEqual(result, "1.2.0")
+            self.assertEqual(result, "1.3.0")
             
             cache_file = cache_dir / "version_check.json"
             self.assertTrue(cache_file.exists())
             cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
-            self.assertEqual(cached_data["latest_version"], "1.2.0")
+            self.assertEqual(cached_data["latest_version"], "1.3.0")
 
     @patch.dict(os.environ, {"UNIVERSAL_TRANSCRIBER_NO_UPDATE_CHECK": "1"})
     def test_suppression_via_env_var(self):
@@ -118,7 +118,7 @@ class TestVersionChecker(unittest.TestCase):
             text=True,
         )
         self.assertEqual(res_ut.returncode, 0)
-        self.assertIn("1.1.0", res_ut.stdout + res_ut.stderr)
+        self.assertIn("1.2.0", res_ut.stdout + res_ut.stderr)
 
         # Transcriber Anki CLI --version
         res_anki = subprocess.run(
@@ -127,7 +127,7 @@ class TestVersionChecker(unittest.TestCase):
             text=True,
         )
         self.assertEqual(res_anki.returncode, 0)
-        self.assertIn("1.1.0", res_anki.stdout + res_anki.stderr)
+        self.assertIn("1.2.0", res_anki.stdout + res_anki.stderr)
 
 
 if __name__ == "__main__":

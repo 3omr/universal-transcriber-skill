@@ -351,6 +351,7 @@ class Phase0Report:
     preparation: PreparationReport | None = None
     reference_guidance: list[dict[str, Any]] = field(default_factory=list)
     evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
+    assessment_sources: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -427,6 +428,7 @@ class TranscriptIdentity:
     title: str
     emoji: str
     recording_source: str
+    source_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1094,7 +1096,15 @@ def scan_local_sources(
         normalize_relative_source_path(source.relative_path)
         for source in local_sources
     }
-    missing_manifest_paths = sorted(set(classifications) - local_paths)
+    remote_only_manifest_paths = {
+        normalize_relative_source_path(str(entry.get("path", "")))
+        for entry in assessment_sources
+        if str(entry.get("action", "")).strip().casefold()
+        in {"use_remote", "remote_only"}
+    }
+    missing_manifest_paths = sorted(
+        (set(classifications) - local_paths) - remote_only_manifest_paths
+    )
     if missing_manifest_paths:
         raise Phase0Error(
             "Assessment manifest references missing local source(s): "
@@ -2226,10 +2236,10 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
         require_assessment_manifest=request.agent_reviewed,
         prepared_sources=prepared_sources,
     )
-    if not local_sources:
+    if not local_sources and not remote_sources:
         raise Phase0Error(
             f"No source files were found under {request.sources_root}/Lecture, "
-            "Questions"
+            "Questions, and no remote sources exist in the notebook"
         )
     verify_document_text(local_sources)
     report = _new_phase0_report(
@@ -2240,7 +2250,9 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
     )
     report.preparation = preparation
     report.reference_guidance = _reference_guidance_from_preparation(preparation)
+    report.assessment_sources = request.assessment_sources
     report.evidence_catalog = build_evidence_catalog(report)
+    report.year_map = _year_map_from_catalog(report.evidence_catalog)
     report.blocking_errors.extend(preparation.blocking_errors)
     return report
 
@@ -2329,6 +2341,7 @@ def _refresh_evidence_metadata(report: Phase0Report) -> None:
     )
     report.question_bank_links = link_exam_sources_to_question_banks(remotely_available)
     report.evidence_catalog = build_evidence_catalog(report)
+    report.year_map = _year_map_from_catalog(report.evidence_catalog)
 
 
 def _approved_upload_candidates(
@@ -3284,7 +3297,7 @@ def _render_name_list(names: list[str]) -> str:
 
 def _remote_local_names(report: Phase0Report, roles: set[str]) -> list[str]:
     selected_references = _selected_reference_paths(report)
-    return sorted(
+    local_names = [
         source.name
         for source in report.local_sources
         if source.role in roles
@@ -3294,7 +3307,15 @@ def _remote_local_names(report: Phase0Report, roles: set[str]) -> list[str]:
             in selected_references
         )
         and _source_has_ready_remote(source, report.remote_sources)
-    )
+    ]
+    remote_only_names = [
+        str(entry.get("canonical_name", ""))
+        for entry in report.evidence_catalog
+        if entry.get("role") in roles
+        and _catalog_entry_is_available(entry)
+        and entry.get("canonical_name")
+    ]
+    return sorted(set((*local_names, *remote_only_names)))
 
 
 def _remote_sources_for_title(
@@ -3365,8 +3386,16 @@ def _local_evidence_entry(
 
 
 def _remote_only_evidence_entry(
-    remote: RemoteSource, authority_keys: set[str], authority_stems: set[str]
+    remote: RemoteSource,
+    authority_keys: set[str],
+    authority_stems: set[str],
+    assessment_metadata: dict[str, tuple[str, tuple[int, ...]]] | None = None,
 ) -> dict[str, Any]:
+    assessment = (assessment_metadata or {}).get(remote.normalized_name) or (
+        assessment_metadata or {}
+    ).get(remote.normalized_stem)
+    role = assessment[0] if assessment else _classify_source(remote.title, "")
+    verified_years = list(assessment[1]) if assessment else []
     return {
         "canonical_name": remote.title,
         "normalized_name": remote.normalized_name,
@@ -3374,8 +3403,8 @@ def _remote_only_evidence_entry(
         "source_ids": [remote.source_id] if remote.source_id else [],
         "notebook_id": remote.notebook_uuid,
         "notebook_ids": [remote.notebook_uuid] if remote.notebook_uuid else [],
-        "role": _classify_source(remote.title, ""),
-        "verified_years": [],
+        "role": role,
+        "verified_years": verified_years,
         "local_path": "",
         "remote_status": [remote.status or "available"],
         "aliases": [remote.title],
@@ -3385,6 +3414,7 @@ def _remote_only_evidence_entry(
         "selected_for_run": (
             remote.normalized_name in authority_keys
             or remote.normalized_stem in authority_stems
+            or assessment is not None
         ),
     }
 
@@ -3406,8 +3436,31 @@ def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
     authority_names = (*report.recording_sources, report.slide_source)
     authority_keys = {normalize_source_key(name) for name in authority_names if name}
     authority_stems = {normalize_source_stem(name) for name in authority_names if name}
+    assessment_metadata: dict[str, tuple[str, tuple[int, ...]]] = {}
+    for assessment_source in report.assessment_sources:
+        source_type = str(assessment_source.get("type", "")).strip()
+        if source_type not in {"past_exam", "question_bank"}:
+            continue
+        path = str(assessment_source.get("path", "")).strip()
+        if not path:
+            continue
+        raw_years = assessment_source.get("years")
+        if raw_years is None and assessment_source.get("year") is not None:
+            raw_years = [assessment_source.get("year")]
+        if not isinstance(raw_years, list):
+            raw_years = [raw_years] if raw_years is not None else []
+        years = tuple(
+            sorted({int(value) for value in raw_years if str(value).strip().isdigit()})
+        )
+        for key in {
+            normalize_source_key(os.path.basename(path)),
+            normalize_source_stem(path),
+        }:
+            assessment_metadata[key] = (source_type, years)
     catalog.extend(
-        _remote_only_evidence_entry(remote, authority_keys, authority_stems)
+        _remote_only_evidence_entry(
+            remote, authority_keys, authority_stems, assessment_metadata
+        )
         for remote in report.remote_sources
         if normalize_source_key(remote.title) not in local_keys
     )
@@ -3514,6 +3567,29 @@ def _build_query_scope(
             project_sources.setdefault(project_id, ([], [], {}))[0].append(
                 local_source.name
             )
+
+    for entry in report.evidence_catalog:
+        if entry.get("role") not in local_roles or not _catalog_entry_is_available(entry):
+            continue
+        source_ids = [
+            str(source_id)
+            for source_id in entry.get("source_ids", [])
+            if str(source_id).strip()
+        ]
+        if not source_ids:
+            continue
+        project_id = str(entry.get("notebook_id") or report.notebook.notebook_uuid)
+        aliases, scoped_ids, names_by_id = project_sources.setdefault(
+            project_id, ([], [], {})
+        )
+        canonical_name = str(entry.get("canonical_name", "")).strip()
+        if canonical_name and canonical_name not in aliases:
+            aliases.append(canonical_name)
+        for source_id in source_ids:
+            if source_id not in scoped_ids:
+                scoped_ids.append(source_id)
+            if canonical_name:
+                names_by_id[source_id] = canonical_name
 
     project_scopes = tuple(
         ProjectQueryScope(
@@ -4492,6 +4568,16 @@ def _question_stem_fingerprint(block: str) -> str:
 
 
 def _question_group_key(block: str, heading_prefix: str) -> tuple[str, bool]:
+    if heading_prefix in {"Clinical Case", "Case"}:
+        case_identity = _question_fingerprint_text(
+            "\n".join(
+                (
+                    _field_content(block, "Scenario"),
+                    _field_content(block, "Questions"),
+                )
+            )
+        )
+        return case_identity, "**[IMP]**" in block
     return _question_fingerprint(block, heading_prefix), "**[IMP]**" in block
 
 
@@ -4560,6 +4646,7 @@ def _normalize_mcq_block(block: str) -> str:
         for line in lines
     ]
     text = "\n".join(cleaned_lines).strip()
+    text = NOTEBOOK_CITATION_PATTERN.sub("", text)
     text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", text)
     text = re.sub(r"\*\*Options\s*(?:\(verbatim\))?:\*\*", "**Options:**", text)
     text = re.sub(
@@ -4587,6 +4674,7 @@ def _normalize_written_block(block: str) -> str:
         for line in lines
     ]
     text = "\n".join(cleaned_lines).strip()
+    text = NOTEBOOK_CITATION_PATTERN.sub("", text)
     text = re.sub(r"\*\*Question\s*(?:\(verbatim\))?:\*\*", "**Question:**", text)
     text = re.sub(r"\*\*Model Answer\s*(?:\(Short\))?:\*\*", "**Model Answer:**", text)
     text = re.sub(
@@ -4610,6 +4698,7 @@ def _normalize_case_block(block: str) -> str:
             stripped = stripped[1:]
         cleaned_lines.append(stripped)
     text = "\n".join(cleaned_lines).strip()
+    text = NOTEBOOK_CITATION_PATTERN.sub("", text)
     text = re.sub(
         r"^\*\*🩺 Clinical Case\s+(\d+):\*\*(.*)$",
         r"### Clinical Case \1\2",
@@ -5274,6 +5363,8 @@ def clean_notebooklm_phrases(text: str) -> str:
         r"Internal request marker: USTE-[0-9a-f]+[^\n]*",
         r"Studio Panel",
         r"Audio Overview",
+        r"(?m)^\s*(?:[👁️📊🎧🔍💡📝]|\\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
+        r"(?m)^---\s*\n+\s*(?:[👁️📊🎧🔍💡📝]|\\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
     )
     cleaned = text
     for pattern in patterns:
@@ -5329,13 +5420,34 @@ def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
 
 
 def _document_header(identity: TranscriptIdentity) -> str:
+    source_line = ""
+    if identity.source_files:
+        rendered_sources = "، ".join(f"`{name}`" for name in identity.source_files)
+        source_line = f"> **الملفات المعتمدة:** {rendered_sources}\n"
     return (
         f"# {identity.emoji} التفريغ الأكاديمي المنسق لمحاضرة: "
         f"`{identity.title}` ({identity.subject})\n"
         "> **المصدر الأساسي: شرح الدكتور المسجل في NotebookLM. "
         "السلايدات والكتب تُستخدم للسياق المختار فقط؛ وأي معلومة غير مشروحة "
         "تظهر كإضافة من المصدر بوضوح.**\n"
+        + source_line
     )
+
+
+def _identity_source_files(
+    request: RunRequest, report: Phase0Report
+) -> tuple[str, ...]:
+    names = list(report.recording_sources)
+    if report.slide_source:
+        names.append(report.slide_source)
+    manifest = request.source_manifest or {}
+    for reference in manifest.get("references", ()):
+        if not isinstance(reference, dict):
+            continue
+        path = reference.get("path") or reference.get("source") or reference.get("name")
+        if path:
+            names.append(os.path.basename(str(path)))
+    return tuple(dict.fromkeys(name for name in names if name))
 
 
 def assemble_document(
@@ -5435,7 +5547,12 @@ def _leaked_content_errors(text: str) -> list[str]:
     errors: list[str] = []
     if NOTEBOOK_CITATION_PATTERN.search(text):
         errors.append("numeric NotebookLM citations leaked into final Markdown")
-    lowered_text = text.casefold()
+    leak_scan_text = re.sub(
+        r"(?m)^> \*\*الملفات المعتمدة:\*\*.*(?:\n|$)",
+        "",
+        text,
+    )
+    lowered_text = leak_scan_text.casefold()
     if any(
         signal in lowered_text
         for signal in (
@@ -5450,12 +5567,12 @@ def _leaked_content_errors(text: str) -> list[str]:
         errors.append("evidence-only Source fields leaked into final Markdown")
     if re.search(
         r"(?i)(?<![\w.-])[^\s`|<>]+\.(?:aac|avi|docx|m4a|md|mkv|mov|mp3|ogg|pdf|ppt|pptx|pps|ppsx|txt|wav|webm)(?![\w.-])",
-        text,
+        leak_scan_text,
     ):
         errors.append("local source filenames leaked into final Markdown")
     if re.search(
         r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
-        text,
+        leak_scan_text,
     ):
         errors.append("NotebookLM source or project IDs leaked into final Markdown")
     return errors
@@ -6857,7 +6974,11 @@ def _run_pipeline(config: dict[str, Any], request: RunRequest) -> int:
         return _finalize_pipeline(config, request)
     report = run_phase0_sync(_phase0_request(config, request))
     identity = TranscriptIdentity(
-        request.subject, request.title, request.emoji, report.recording_source
+        request.subject,
+        request.title,
+        request.emoji,
+        report.recording_source,
+        _identity_source_files(request, report),
     )
     context = _pipeline_context(
         config, report, identity, request.exam_style_profile
@@ -6905,7 +7026,11 @@ def _finalize_pipeline(config: dict[str, Any], request: RunRequest) -> int:
         report.evidence_catalog,
     )
     identity = TranscriptIdentity(
-        request.subject, request.title, request.emoji, report.recording_source
+        request.subject,
+        request.title,
+        request.emoji,
+        report.recording_source,
+        _identity_source_files(request, report),
     )
     index_path = commit_managed_transcript(identity, request.target, document)
     _delete_review_draft(draft_path)

@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 REPO_NAME = "3omr/universal-transcriber-skill"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_NAME}/releases/latest"
 DEFAULT_CACHE_TTL = 86400  # 24 hours in seconds

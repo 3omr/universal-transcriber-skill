@@ -237,6 +237,20 @@ def _create_module(request: CreateRequest) -> int:
         "Notebooks: "
         + ", ".join(f"{notebook.title} ({notebook.notebook_id})" for notebook in notebooks)
     )
+    for nb in notebooks:
+        if not nb.created and nb.notebook_id:
+            try:
+                payload = _nlm_json(["source", "list", nb.notebook_id], request.nlm_profile)
+                sources = payload if isinstance(payload, list) else (payload.get("sources", []) if isinstance(payload, dict) else [])
+                if sources:
+                    print(f"  📦 Found {len(sources)} existing remote source(s) in NotebookLM ({nb.title}):")
+                    for s in sources[:8]:
+                        title = s.get("title") or s.get("name") or "Unknown"
+                        print(f"    - {title}")
+                    if len(sources) > 8:
+                        print(f"    ... and {len(sources) - 8} more.")
+            except Exception:
+                pass
     created_notebook_titles = [
         notebook.title for notebook in notebooks if notebook.created
     ]
