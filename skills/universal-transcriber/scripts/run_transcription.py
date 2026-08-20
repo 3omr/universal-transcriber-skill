@@ -27,6 +27,10 @@ from module_registry import (
     discover_modules,
     resolve_module,
 )
+from version_checker import (
+    __version__,
+    print_update_notice_if_available,
+)
 
 
 class LauncherError(RuntimeError):
@@ -1024,6 +1028,16 @@ def _parser() -> argparse.ArgumentParser:
         "--recovery-response",
         help="Path inside the run cache to the Agent-repaired phase response",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"universal-transcriber {__version__}",
+    )
+    parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help="Skip checking for newer versions",
+    )
     return parser
 
 
@@ -1033,6 +1047,13 @@ def main() -> int:
         if reconfigure:
             reconfigure(line_buffering=True)
     args = _parser().parse_args()
+    workspace_for_cache = None
+    if getattr(args, "workspace", None):
+        try:
+            workspace_for_cache = Path(args.workspace).expanduser().resolve()
+        except Exception:
+            pass
+    print_update_notice_if_available(workspace=workspace_for_cache, quiet=getattr(args, "no_update_check", False))
     try:
         if bool(args.recovery_phase) != bool(args.recovery_response):
             raise LauncherError(
