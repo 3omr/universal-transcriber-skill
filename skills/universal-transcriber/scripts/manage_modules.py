@@ -22,6 +22,10 @@ from module_registry import (
     normalize_module_name,
     resolve_module,
 )
+from version_checker import (
+    __version__,
+    print_update_notice_if_available,
+)
 
 
 class ModuleManagerError(RuntimeError):
@@ -345,11 +349,28 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("list")
     migrate = commands.add_parser("merge-exams")
     migrate.add_argument("--module", required=True)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"transcriber-setup {__version__}",
+    )
+    parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help="Skip checking for newer versions",
+    )
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
+    workspace_for_cache = None
+    if getattr(args, "workspace", None):
+        try:
+            workspace_for_cache = Path(args.workspace).expanduser().resolve()
+        except Exception:
+            pass
+    print_update_notice_if_available(workspace=workspace_for_cache, quiet=getattr(args, "no_update_check", False))
     try:
         if args.command == "create":
             return _create_module(_create_request(args))

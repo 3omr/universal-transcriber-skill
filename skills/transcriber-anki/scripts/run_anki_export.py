@@ -23,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from transcript_concept_extractor import TranscriptConceptExtractor
 from deck_exporter import DeckExporter
+from version_checker import __version__, print_update_notice_if_available
 
 
 def print_blueprint_table(lecture_title: str, cards: List[Dict[str, Any]]) -> None:
@@ -121,10 +122,13 @@ def main():
     parser.add_argument("--generate", action="store_true", help="Directly generate .apkg and .tsv files")
     parser.add_argument("--from-blueprint", help="Path to an approved/edited blueprint JSON file to compile into Anki decks")
     parser.add_argument("--output-dir", help="Custom output directory for Anki decks")
+    parser.add_argument("--version", action="version", version=f"transcriber-anki {__version__}")
+    parser.add_argument("--no-update-check", action="store_true", help="Skip checking for newer versions")
 
     args = parser.parse_args()
 
     workspace_root = Path(args.workspace).resolve()
+    print_update_notice_if_available(workspace=workspace_root, quiet=args.no_update_check)
     module_id = args.module
     
     # Destination directories
