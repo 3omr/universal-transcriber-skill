@@ -671,7 +671,12 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
         for item in sorted(questions_dir.iterdir()):
             if item.name.startswith(".") or item.suffix.lower() not in {".pdf", ".txt", ".docx"}:
                 continue
-            years = [int(match) for match in re.findall(r"\b(20[12]\d)\b", item.name)]
+            years = [int(match) for match in re.findall(r"(20[12]\d)", item.name)]
+            if not years:
+                short_years = [int(m) for m in re.findall(r"(?:^|[^0-9])([12]\d)(?:[^0-9]|$)", item.name)]
+                for sy in short_years:
+                    if 18 <= sy <= 30:
+                        years.append(2000 + sy)
             if years:
                 assessment_sources.append({
                     "path": f"Questions/{item.name}",
@@ -685,6 +690,75 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
                     "type": "question_bank",
                     "action": "auto",
                 })
+
+    # If local assessment or audio/slide sources are empty, attempt remote discovery via module.json
+    slides_action = "auto"
+    module_json_path = module_root / "module.json"
+    if (not assessment_sources or not audio_files or not slide_files) and module_json_path.is_file():
+        try:
+            with open(module_json_path, "r", encoding="utf-8") as f:
+                mod_meta = json.load(f)
+            notebooks = mod_meta.get("notebooks") or []
+            if notebooks:
+                nb_id = str(notebooks[0].get("id"))
+                nb_profile = mod_meta.get("notebook_profile")
+                nlm_cmd = ["nlm", "source", "list", nb_id, "--json"]
+                if nb_profile:
+                    nlm_cmd.extend(["--profile", str(nb_profile)])
+                proc = subprocess.run(nlm_cmd, capture_output=True, text=True, timeout=30)
+                if proc.returncode == 0:
+                    remote_list = json.loads(proc.stdout)
+                    if isinstance(remote_list, dict):
+                        remote_list = remote_list.get("sources") or []
+                    if isinstance(remote_list, list):
+                        need_remote_assessments = not assessment_sources
+                        need_remote_audio = not audio_files or matched_audio == [f"{query_stem}.mp3"]
+                        need_remote_slides = not best_slide
+                        for r_src in remote_list:
+                            r_title = str(r_src.get("title") or r_src.get("name") or "").strip()
+                            if not r_title:
+                                continue
+                            r_lower = r_title.casefold()
+                            is_book = any(k in r_lower for k in ["book", "textbook", "reference"])
+                            is_exam = any(k in r_lower for k in ["exam", "final", "202", "questions", "bank", "august", "may", "دور"])
+
+                            # Match remote assessment files if none found locally
+                            if need_remote_assessments and is_exam and not is_book:
+                                r_years = [int(m) for m in re.findall(r"(20[12]\d)", r_title)]
+                                if not r_years:
+                                    s_years = [int(m) for m in re.findall(r"(?:^|[^0-9])([12]\d)(?:[^0-9]|$)", r_title)]
+                                    for sy in s_years:
+                                        if 18 <= sy <= 30:
+                                            r_years.append(2000 + sy)
+                                if r_years:
+                                    assessment_sources.append({
+                                        "path": f"Questions/{r_title}" if not r_title.startswith("Questions/") else r_title,
+                                        "type": "past_exam",
+                                        "year": max(r_years),
+                                        "action": "use_remote",
+                                    })
+                                else:
+                                    assessment_sources.append({
+                                        "path": f"Questions/{r_title}" if not r_title.startswith("Questions/") else r_title,
+                                        "type": "question_bank",
+                                        "action": "use_remote",
+                                    })
+
+                            # Match remote audio files if no local audio matched
+                            if need_remote_audio and (any(r_lower.endswith(ext) for ext in [".mp3", ".m4a", ".wav", ".aac", ".ogg"]) or r_src.get("type") == "audio"):
+                                if score_match(r_title) > 0:
+                                    if matched_audio == [f"{query_stem}.mp3"]:
+                                        matched_audio = [r_title]
+                                    elif r_title not in matched_audio:
+                                        matched_audio.append(r_title)
+
+                            # Match remote slides or book if no local slide matched
+                            if need_remote_slides and (is_book or any(r_lower.endswith(ext) for ext in [".pdf", ".pptx", ".ppsx", ".ppt", ".docx"])):
+                                if score_match(r_title) > 0 or (is_book and not best_slide):
+                                    slide_path = f"Lecture/{r_title}" if not r_title.startswith("Lecture/") else r_title
+                                    slides_action = "use_remote"
+        except Exception:
+            pass
 
     exam_style_profile = {
         "mcq": {
@@ -726,7 +800,7 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
         "recording_sources": matched_audio,
         "slides": {
             "path": slide_path,
-            "action": "auto",
+            "action": slides_action,
         },
         "assessment_sources": assessment_sources,
         "exam_style_profile": exam_style_profile,

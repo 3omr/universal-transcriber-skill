@@ -51,6 +51,15 @@ Use these exact terms. Do not paraphrase or coin synonyms.
     - During editorial review, the Agent / Worker Agent must cross-check every extracted Past Exam and Question Bank item against Section 1 (Chronological Guide) and the lecture's slide deck.
     - If an assessment question covers topics from another chapter or lecture that were neither explained by the doctor in the audio nor present in the slides (e.g. Firearm wounds in a Mechanical Wounds lecture), it must be pruned/deleted immediately. Questions in the transcript must test only the taught curriculum of that specific lecture. After pruning, re-index question numbers sequentially.
 
+## Telegram Transcription Workflow
+
+When a Telegram message asks to transcribe a lecture or generate study materials, operate from this repository root and use the project-local launcher and skills. Resolve the requested module from `modules/<module_id>/module.json`; do not use a sibling checkout or a profile copy.
+
+1. Inspect `Lecture/` and `Questions/`. If they contain no user data, verify if the data was already uploaded to the configured NotebookLM. If so, continue seamlessly in remote-only mode and do not create placeholder files.
+2. Build one explicit manifest for the lecture. Multipart recordings belong to one `recording_sources` array in chronological order.
+3. Run audit, draft, editorial review, and finalize with checkpoint/recovery. Do not start duplicate runs or re-query completed phases.
+4. After successful finalize, send the user the transcript as a Telegram attachment using `MEDIA:/absolute/path/to/Transcripts/<file>.md` and include a short completion message. If Anki flashcards were requested, compile and attach them via `MEDIA:/absolute/path/to/Anki/<file>.apkg`.
+
 ---
 
 ## Local Agent Symlink

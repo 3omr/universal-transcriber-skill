@@ -11,6 +11,16 @@ The Agent supervises source reconciliation, editorial review, and quality gates.
 
 ---
 
+## Project-Bound Execution Rules
+
+- **Workspace authority**: Resolve the repository root with `git rev-parse --show-toplevel` and use that exact absolute path. Before running, verify `<root>/AGENTS.md`, `<root>/skills/universal-transcriber/SKILL.md`, and `<root>/modules/<module_id>/module.json`. Never use a sibling checkout, a profile copy, or a hard-coded workspace from another project.
+- **Local & Remote data handling**: Inspect `Lecture/` and `Questions/`. If they contain no user data, check if the data was already uploaded to the configured NotebookLM. If present on NotebookLM, continue seamlessly in remote-only mode and do not upload placeholder files.
+- **Notebook authority**: Read the selected module's `module.json` and use only its configured NotebookLM ID(s). Never fall back to another notebook because its title happens to match. If both local inputs and the configured notebook are empty, ask the user where the data is.
+- **Explicit source manifests**: When the user names recordings or references, author one manifest with the exact ordered sources. A multipart lecture is one lecture unit and one run (e.g. `recording_sources: ["Part 1.mp3", "Part 2.mp3"]`). The student-facing title should not have technical chunk numbers. Preserve original filenames in the `الملفات المعتمدة` header.
+- **Latency and recovery**: Run one audit and one draft. On phase validation errors, use the saved checkpoint and agent-side recovery response; do not restart the whole run or re-query completed phases. Never launch duplicate runs for the same lecture key.
+
+---
+
 ## When to Use
 
 - Transcribing single or multipart lecture audio recordings for a medical module.
