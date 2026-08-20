@@ -593,12 +593,12 @@ class TranscriberTests(unittest.TestCase):
             ), patch.object(
                 engine, "_query_written", return_value=engine.QueryResult("written retry")
             ), patch.object(
-                engine, "_query_cases", return_value=engine.QueryResult("cases retry")
+                engine, "_query_cases", side_effect=AssertionError("cases rerun")
             ):
                 sections = engine._run_checkpointed_phases(retried, context)
 
         self.assertEqual(sections.written, "written retry")
-        self.assertEqual(sections.cases, "cases retry")
+        self.assertEqual(sections.cases, "cases")
 
     def test_agent_recovery_accepts_repaired_phase_and_runs_dependents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

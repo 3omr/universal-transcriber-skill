@@ -586,6 +586,13 @@ TOPIC_SYNONYMS: dict[str, str] = {
     "favism": "food poisoning",
     "psychotropic": "psychotropic",
     "antidepressant": "psychotropic",
+    "salicylate": "salicylic",
+    "salicylates": "salicylic",
+    "salycylates": "salicylic",
+    "aspirin": "salicylic",
+    "acetyl salicylic": "salicylic",
+    "acetyl salysilic": "salicylic",
+    "أسبرين": "salicylic",
 }
 
 
@@ -634,11 +641,13 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
         for tok in query_tokens:
             if tok in name_lower or name_lower in tok:
                 score += 20
-            elif len(tok) >= 5 and (tok[:5] in name_lower or name_lower[:5] in tok):
+            elif len(tok) >= 4 and (tok[:4] in name_lower or name_lower[:4] in tok):
                 score += 15
         for syn in synonym_targets:
             if syn in name_lower or name_lower in syn:
                 score += 30
+            elif len(syn) >= 4 and (syn[:4] in name_lower or name_lower[:4] in syn):
+                score += 25
         return score
 
     best_slide = None
@@ -699,6 +708,9 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
             with open(module_json_path, "r", encoding="utf-8") as f:
                 mod_meta = json.load(f)
             notebooks = mod_meta.get("notebooks") or []
+            if not notebooks and "notebook" in mod_meta:
+                nb_obj = mod_meta["notebook"]
+                notebooks = [nb_obj] if isinstance(nb_obj, dict) else [{"id": nb_obj}]
             if notebooks:
                 nb_id = str(notebooks[0].get("id"))
                 nb_profile = mod_meta.get("notebook_profile")

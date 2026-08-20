@@ -3257,14 +3257,10 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                     )
                     continue
 
-        if last_errors and any(
-            marker in err.casefold()
-            for err in last_errors
-            for marker in ("unsafe_duplicate_merge", "joined ocr words", "agent review is required")
-        ):
+        if last_errors and last_answer:
             print(
-                f"[Recovery] {query.phase_name} requires Agent editorial review; "
-                "bypassing repeated LLM queries for immediate Agent in-flight repair"
+                f"[Recovery] {query.phase_name} produced raw text with {len(last_errors)} validation issue(s); "
+                "bypassing redundant LLM query retries for immediate Agent in-flight repair"
             )
             raise PhaseValidationError(
                 query.phase_name,
@@ -3276,7 +3272,7 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
 
         if attempt < MAX_ATTEMPTS:
             print(
-                f"[!] {query.phase_name} failed validation on attempt "
+                f"[!] {query.phase_name} failed on attempt "
                 f"{attempt}/{MAX_ATTEMPTS}: "
                 + "; ".join(last_errors)
             )
@@ -3415,7 +3411,9 @@ def _remote_only_evidence_entry(
             remote.normalized_name in authority_keys
             or remote.normalized_stem in authority_stems
             or assessment is not None
+            or role in {"textbook", "reference", "handout"}
         ),
+
     }
 
 
@@ -6682,10 +6680,6 @@ def _apply_agent_recovery(request: RunRequest, context: PipelineContext) -> None
             RecoveryBundle(run_dir, phase, candidate.answer, tuple(errors), checkpoint)
         )
         raise PhaseValidationError(PHASE_LABELS[phase], errors, candidate.answer)
-    for dependent_phase in PHASE_ORDER[PHASE_ORDER.index(phase) + 1 :]:
-        checkpoint.setdefault("phases", {})[dependent_phase] = "pending"
-        checkpoint.setdefault("phase_files", {}).pop(dependent_phase, None)
-        checkpoint.setdefault("phase_errors", {}).pop(dependent_phase, None)
     repaired_name = f"phase-{_phase_slug(phase)}.repaired.md"
     _atomic_write_text(run_dir / repaired_name, candidate.answer)
     checkpoint.setdefault("phases", {})[phase] = "repaired"
@@ -6793,28 +6787,23 @@ def _run_checkpointed_phases(
     if request.retry_phase and not request.resume_run and not request.resume_latest:
         request = replace(request, resume_latest=True)
     run_dir, checkpoint = _run_directory_for_request(request, context)
-    force_from = request.retry_phase
-    if force_from:
-        for phase in PHASE_ORDER[PHASE_ORDER.index(force_from) :]:
-            checkpoint["phases"][phase] = "pending"
-            checkpoint.get("phase_files", {}).pop(phase, None)
-        checkpoint["resume_from"] = force_from
+    force_phase = request.retry_phase
+    if force_phase:
+        checkpoint["phases"][force_phase] = "pending"
+        checkpoint.get("phase_files", {}).pop(force_phase, None)
+        checkpoint["resume_from"] = force_phase
         _atomic_write_json(run_dir / "checkpoint.json", checkpoint)
     results: dict[str, str] = {}
-    forcing = False
     pending_phases: list[str] = []
     for phase in PHASE_ORDER:
-        if phase == force_from:
-            forcing = True
         status = checkpoint.get("phases", {}).get(phase)
         phase_file = checkpoint.get("phase_files", {}).get(phase)
-        if not forcing and status in PHASE_SUCCESS_STATUSES and phase_file:
+        if phase != force_phase and status in PHASE_SUCCESS_STATUSES and phase_file:
             candidate = run_dir / phase_file
             if candidate.is_file():
                 results[phase] = candidate.read_text(encoding="utf-8")
                 print(f"[Resume] {PHASE_LABELS[phase]}: reused")
                 continue
-        forcing = forcing or phase == force_from
         pending_phases.append(phase)
 
     if pending_phases:
