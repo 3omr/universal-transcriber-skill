@@ -79,8 +79,12 @@
     "2026-08-23": {
       "count": 7,
       "uniques": 4
+    },
+    "2026-08-24": {
+      "count": 6,
+      "uniques": 3
     }
   },
-  "total_count": 146,
-  "total_uniques": 93
+  "total_count": 152,
+  "total_uniques": 96
 }
