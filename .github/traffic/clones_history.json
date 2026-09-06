@@ -127,8 +127,12 @@
     "2026-09-04": {
       "count": 16,
       "uniques": 7
+    },
+    "2026-09-05": {
+      "count": 18,
+      "uniques": 10
     }
   },
-  "total_count": 252,
-  "total_uniques": 145
+  "total_count": 270,
+  "total_uniques": 155
 }
