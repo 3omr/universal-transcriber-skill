@@ -593,6 +593,9 @@ def _sync_one_decision(
     incomplete = _incomplete_source(decision, prepared)
     if incomplete:
         return incomplete, 0
+    # _incomplete_source returns a result for every missing prepared source,
+    # so reaching here means the lookup succeeded.
+    assert prepared is not None
     source = context.selected_sources.get(key)
     if source is None:
         return SyncedSource(

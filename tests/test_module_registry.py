@@ -4,10 +4,9 @@ import json
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
-
+from unittest.mock import patch
 
 # skills/ is the source tree; .agents/skills is a generated mirror of it.
 SCRIPTS_DIR = (
@@ -18,6 +17,7 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import manage_modules as manager
 from module_registry import (
     ModuleConfigError,
     configured_slide,
@@ -25,8 +25,6 @@ from module_registry import (
     load_module,
     resolve_module,
 )
-import manage_modules as manager
-
 
 LAUNCHER_PATH = SCRIPTS_DIR / "run_transcription.py"
 LAUNCHER_SPEC = importlib.util.spec_from_file_location(

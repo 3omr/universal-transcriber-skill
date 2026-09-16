@@ -71,7 +71,7 @@ def render_index_content(
     index_path = os.path.join(target.transcripts_dir, "Index.md")
     new_row = _index_row(identity, target)
     if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as index_file:
+        with open(index_path, encoding="utf-8") as index_file:
             index_content = index_file.read()
     else:
         index_content = _new_index(identity)

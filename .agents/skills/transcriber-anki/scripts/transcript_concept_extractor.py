@@ -9,9 +9,8 @@ into structured blueprint items for Anki generation.
 """
 
 import re
-import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 # Supported Medical Pillars
 PILLAR_CONFIG = {
@@ -33,7 +32,7 @@ def clean_markdown_text(text: str) -> str:
     return cleaned
 
 
-def extract_badge(text: str) -> Optional[str]:
+def extract_badge(text: str) -> str | None:
     """Extracts badges like [Past Exams - 2023], [Question Bank], [IMP]."""
     match = re.search(r'\*\*\[(.*?)\]\*\*', text)
     if match:
@@ -50,11 +49,11 @@ class TranscriptConceptExtractor:
         self.module_id = module_id or self.path.parent.parent.name
         self.lecture_title = self.path.stem.replace("🧪", "").strip()
         self.content = ""
-        self.sections: Dict[str, str] = {}
+        self.sections: dict[str, str] = {}
 
     def load_and_split_sections(self) -> None:
         """Reads the transcript and splits it into the 5 academic sections."""
-        with open(self.path, "r", encoding="utf-8") as f:
+        with open(self.path, encoding="utf-8") as f:
             self.content = f.read()
 
         # Split by level 2 markdown headings
@@ -75,9 +74,9 @@ class TranscriptConceptExtractor:
             elif "Clinical Cases" in first_line or "Case" in first_line:
                 self.sections["cases"] = sec_trimmed
 
-    def extract_written_cards(self) -> List[Dict[str, Any]]:
+    def extract_written_cards(self) -> list[dict[str, Any]]:
         """Extracts written questions and converts model answers to structured bullets."""
-        cards = []
+        cards: list[dict[str, Any]] = []
         written_text = self.sections.get("written", "")
         if not written_text:
             return cards
@@ -88,7 +87,7 @@ class TranscriptConceptExtractor:
                 continue
 
             badge = extract_badge(q_block) or "Written Exam"
-            
+
             # Question stem
             q_stem_match = re.search(r'\*\*Question\s*(?:\(verbatim\))?:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', q_block, re.DOTALL)
             if not q_stem_match:
@@ -101,7 +100,7 @@ class TranscriptConceptExtractor:
             if not ans_match:
                 continue
             ans_raw = ans_match.group(1).strip()
-            
+
             bullets = []
             for line in ans_raw.split("\n"):
                 line = line.strip()
@@ -128,9 +127,9 @@ class TranscriptConceptExtractor:
 
         return cards
 
-    def extract_mcq_cards(self) -> List[Dict[str, Any]]:
+    def extract_mcq_cards(self) -> list[dict[str, Any]]:
         """Extracts MCQs and transforms them into active-recall flashcards with option breakdown."""
-        cards = []
+        cards: list[dict[str, Any]] = []
         mcq_text = self.sections.get("mcq", "")
         if not mcq_text:
             return cards
@@ -141,7 +140,7 @@ class TranscriptConceptExtractor:
                 continue
 
             badge = extract_badge(block) or "Past Exam MCQ"
-            
+
             # Question stem
             q_match = re.search(r'\*\*Question\s*(?:\(verbatim\))?:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', block, re.DOTALL)
             if not q_match:
@@ -179,9 +178,9 @@ class TranscriptConceptExtractor:
 
         return cards
 
-    def extract_case_cards(self) -> List[Dict[str, Any]]:
+    def extract_case_cards(self) -> list[dict[str, Any]]:
         """Extracts Clinical Cases into stepwise diagnostic & management cards."""
-        cards = []
+        cards: list[dict[str, Any]] = []
         cases_text = self.sections.get("cases", "")
         if not cases_text:
             return cards
@@ -192,7 +191,7 @@ class TranscriptConceptExtractor:
                 continue
 
             badge = extract_badge(block) or "Clinical Case"
-            
+
             # Scenario
             scen_match = re.search(r'\*\*Scenario:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', block, re.DOTALL)
             scenario = scen_match.group(1).strip() if scen_match else ""
@@ -230,21 +229,24 @@ class TranscriptConceptExtractor:
 
         return cards
 
-    def extract_high_yield_concept_cards(self) -> List[Dict[str, Any]]:
+    def extract_high_yield_concept_cards(self) -> list[dict[str, Any]]:
         """Extracts high-yield concept cards from Section 1 & Section 2 callouts, definitions, and mechanisms."""
-        cards = []
+        cards: list[dict[str, Any]] = []
         full_text = self.content
 
         # Look for [!IMPORTANT] and [!NOTE] blocks in Chronological Guide
         callout_matches = re.finditer(r'>\s*\[!(IMPORTANT|NOTE|WARNING)\]\s*\n(.*?)(?=\n\n\w|\n---|\Z)', full_text, re.DOTALL)
         for m in callout_matches:
-            callout_type = m.group(1)
             body = m.group(2).strip()
-            
-            lines = [re.sub(r'^>\s*', '', l).strip() for l in body.split("\n") if l.strip()]
+
+            lines = [
+                re.sub(r'^>\s*', '', line).strip()
+                for line in body.split("\n")
+                if line.strip()
+            ]
             if not lines:
                 continue
-            
+
             header_line = lines[0]
             if "Necrosis" in header_line or "آلية النخر" in header_line or "Mechanism" in header_line:
                 q_front = f"Compare mechanism of tissue necrosis: Acid vs. Alkali burns ({self.lecture_title})?"
@@ -265,7 +267,7 @@ class TranscriptConceptExtractor:
                     "module": self.module_id
                 })
             elif "مراحل تطور" in header_line or "Phases of Lesion" in header_line or "Evolution" in header_line:
-                q_front = f"What are the 4 chronological phases of corrosive lesion evolution with timelines?"
+                q_front = "What are the 4 chronological phases of corrosive lesion evolution with timelines?"
                 bullets = [
                     "1. Inflammatory Phase (Days 1–2): Acute vascular congestion, severe edema & direct cell death",
                     "2. Sloughing Phase (Days 2–7): Necrotic tissue falls off leaving deep ulceration or perforation",
@@ -291,7 +293,7 @@ class TranscriptConceptExtractor:
                 "category": "def",
                 "category_label": PILLAR_CONFIG["def"]["label"],
                 "badge": "Core Definition",
-                "front": f"Definition of Corrosives and their dual clinical impact on tissues?",
+                "front": "Definition of Corrosives and their dual clinical impact on tissues?",
                 "back_bullets": [
                     "Definition: Chemical substances causing acute, direct destructive corrosion upon tissue contact",
                     "Structural / Histological alteration: Direct cell destruction & histological architecture loss",
@@ -309,7 +311,7 @@ class TranscriptConceptExtractor:
                 "category": "types",
                 "category_label": PILLAR_CONFIG["types"]["label"],
                 "badge": "Core Classification",
-                "front": f"Modern classification of Corrosive substances based on chemical composition?",
+                "front": "Modern classification of Corrosive substances based on chemical composition?",
                 "back_bullets": [
                     "1. Acid Corrosives: Mineral / Inorganic (H2SO4, HCl, HNO3) & Organic (Phenol, Oxalic acid)",
                     "2. Alkali Corrosives: Caustic soda (NaOH), Potash (KOH), Ammonia",
@@ -324,7 +326,7 @@ class TranscriptConceptExtractor:
 
         return cards
 
-    def _classify_category(self, question_stem: str, bullets: List[str]) -> str:
+    def _classify_category(self, question_stem: str, bullets: list[str]) -> str:
         """Heuristic classifier to categorize a question into one of the 7 medical pillars."""
         q_lower = question_stem.lower()
 
@@ -342,20 +344,20 @@ class TranscriptConceptExtractor:
             return "signs"
         if any(w in q_lower for w in ["past exam", "exam", "final"]):
             return "past_exams"
-        
+
         return "past_exams"
 
-    def extract_full_blueprint(self) -> List[Dict[str, Any]]:
+    def extract_full_blueprint(self) -> list[dict[str, Any]]:
         """Scans all sections and returns a deduplicated, balanced blueprint of cards."""
         self.load_and_split_sections()
-        
+
         written_cards = self.extract_written_cards()
         concept_cards = self.extract_high_yield_concept_cards()
         case_cards = self.extract_case_cards()
         mcq_cards = self.extract_mcq_cards()
 
         all_cards = concept_cards + written_cards + case_cards + mcq_cards
-        
+
         unique_cards = []
         seen_fronts = set()
         for c in all_cards:
@@ -367,7 +369,7 @@ class TranscriptConceptExtractor:
         return unique_cards
 
 
-def generate_blueprint_for_transcript(transcript_path: str, module_id: str = "") -> List[Dict[str, Any]]:
+def generate_blueprint_for_transcript(transcript_path: str, module_id: str = "") -> list[dict[str, Any]]:
     """Helper entry point to extract blueprint list from transcript path."""
     extractor = TranscriptConceptExtractor(Path(transcript_path), module_id=module_id)
     return extractor.extract_full_blueprint()

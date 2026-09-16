@@ -16,8 +16,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import source_sync
 import universal_transcribe as engine
 from source_sync import (
-    SourceSyncRequest,
     SourceSyncError,
+    SourceSyncRequest,
     apply_source_sync,
     audit_source_sync,
     load_sync_manifest,

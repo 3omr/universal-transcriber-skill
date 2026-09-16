@@ -15,10 +15,10 @@ catch it -- when ``blocking=False`` and another process holds the lock.
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Iterator
+from typing import IO
 
 try:  # POSIX
     import fcntl
@@ -59,10 +59,10 @@ def lock_file(handle: IO[str], *, blocking: bool = True) -> None:
         # msvcrt locks a byte range rather than the whole file, so every caller
         # must agree on the range; byte 0 of the lock file is the convention
         # here. LK_LOCK retries for ~10s before raising, LK_NBLCK fails at once.
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK  # type: ignore[attr-defined]
         handle.seek(0)
         try:
-            msvcrt.locking(handle.fileno(), mode, 1)
+            msvcrt.locking(handle.fileno(), mode, 1)  # type: ignore[attr-defined]
         except OSError as error:
             raise AlreadyLocked(str(error)) from error
         return

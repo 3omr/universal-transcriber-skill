@@ -12,7 +12,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "next_version.py"
 SPEC = importlib.util.spec_from_file_location("test_next_version_module", SCRIPT)

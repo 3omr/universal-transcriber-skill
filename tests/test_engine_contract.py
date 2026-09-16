@@ -19,7 +19,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 SCRIPTS_DIR = (
     Path(__file__).parents[1] / "skills" / "universal-transcriber" / "scripts"
 )

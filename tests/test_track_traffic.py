@@ -12,7 +12,6 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-
 SCRIPT = Path(__file__).parents[1] / ".github" / "scripts" / "track_traffic.py"
 SPEC = importlib.util.spec_from_file_location("test_track_traffic_module", SCRIPT)
 if SPEC is None or SPEC.loader is None:

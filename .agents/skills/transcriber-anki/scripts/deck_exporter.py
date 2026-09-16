@@ -10,7 +10,7 @@ Exports generated medical flashcards into:
 import csv
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 try:
     import genanki
@@ -18,7 +18,7 @@ try:
 except ImportError:
     GENANKI_AVAILABLE = False
 
-from card_builder import ANKI_CARD_CSS, format_card_front_html, format_card_back_html
+from card_builder import ANKI_CARD_CSS, format_card_back_html, format_card_front_html
 
 
 def get_deterministic_id(seed_str: str) -> int:
@@ -33,7 +33,7 @@ def create_anki_model(model_name: str = "Medical High-Yield Written Model") -> A
         return None
 
     model_id = get_deterministic_id(model_name)
-    
+
     model = genanki.Model(
         model_id,
         model_name,
@@ -63,13 +63,13 @@ class DeckExporter:
         self.lecture_title = lecture_title
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Deck naming
         clean_lecture = self.lecture_title.replace("🧪", "").strip()
         self.deck_name = f"Medical::{self.module_id.upper()}::{clean_lecture}"
         self.clean_filename = clean_lecture.replace(" ", "_").replace("(", "").replace(")", "")
 
-    def export_apkg(self, cards: List[Dict[str, Any]]) -> Path:
+    def export_apkg(self, cards: list[dict[str, Any]]) -> Path:
         """Exports cards to an .apkg file."""
         if not GENANKI_AVAILABLE:
             raise RuntimeError("genanki package is not installed. Please run: pip install genanki")
@@ -108,26 +108,26 @@ class DeckExporter:
         package.write_to_file(str(out_path))
         return out_path
 
-    def export_tsv(self, cards: List[Dict[str, Any]]) -> Path:
+    def export_tsv(self, cards: list[dict[str, Any]]) -> Path:
         """Exports cards to a TSV file ready for Anki manual import."""
         out_path = self.output_dir / f"{self.clean_filename}.tsv"
-        
+
         with open(out_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f, delimiter="\t")
             # Header
             writer.writerow(["#Front", "Back", "Tags"])
-            
+
             for c in cards:
                 front_html = format_card_front_html(c).replace("\n", " ")
                 back_html = format_card_back_html(c).replace("\n", " ")
                 category = c.get("category", "past_exams")
                 badge = c.get("badge", "")
-                
+
                 tags = f"Module::{self.module_id} Lecture::{self.clean_filename} Pillar::{category}"
                 if badge:
                     clean_badge_tag = badge.replace(" ", "_").replace("-", "_").replace("[", "").replace("]", "")
                     tags += f" Badge::{clean_badge_tag}"
-                
+
                 writer.writerow([front_html, back_html, tags])
 
         return out_path

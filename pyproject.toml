@@ -1,0 +1,61 @@
+# Tooling configuration only. This project is not distributed as a Python
+# package -- the skills are used from the repository (or a skills.sh install),
+# so there is deliberately no [project] table or build backend here.
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+extend-exclude = [
+    # Generated mirror of skills/. Linting it would report every finding twice
+    # and invite fixes in the copy that sync-agents-mirror.sh then discards.
+    ".agents",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+]
+ignore = [
+    # The engine's user-facing messages are long sentences on purpose and read
+    # worse when split; E501 is enforced by the formatter where it matters.
+    "E501",
+    # The codebase uses both nested and combined `with` blocks deliberately;
+    # rewriting 16 test blocks to satisfy a style preference is pure churn.
+    "SIM117",
+    # try/except/pass is used where the comment above it already explains why
+    # the failure is ignored. contextlib.suppress would hide that comment's
+    # subject.
+    "SIM105",
+    # Adding strict= to zip() changes runtime behaviour on ragged input. Worth
+    # auditing, but on purpose and in its own pull request -- not as a drive-by
+    # in a lint pass.
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Both of these set up sys.path before importing the modules under test or the
+# sibling scripts, so their imports cannot be at the top of the file.
+"tests/*" = ["E402"]
+"skills/*/scripts/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["skills", "scripts", ".github/scripts"]
+# The anki copy of version_checker.py is byte-identical to the transcriber
+# one (enforced by scripts/check-shared-files.sh), and mypy cannot resolve two
+# modules with the same name. Checking one of them checks both.
+exclude = "(^\\.agents/|/__pycache__/|^skills/transcriber-anki/scripts/version_checker\\.py$)"
+# Deliberately permissive to start. The codebase is already fully annotated,
+# so the value here is catching real contradictions, not chasing strictness.
+# Tighten in its own pull request once this is green and stays green.
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = false

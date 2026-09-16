@@ -6,7 +6,6 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-
 # skills/ is the source tree; .agents/skills is a generated mirror of it.
 SCRIPTS_DIR = (
     Path(__file__).parents[1]

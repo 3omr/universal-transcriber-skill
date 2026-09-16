@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 SCRIPTS_DIR = (
     Path(__file__).parents[1]
     / "skills"
@@ -157,16 +156,15 @@ class TranscriberTests(unittest.TestCase):
                 engine,
                 "upload_missing_sources",
                 side_effect=upload_missing_sources,
-            ):
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    tuple(
-                        executor.map(
-                            lambda report: engine._upload_phase0_sources(
-                                request, report
-                            ),
-                            reports,
-                        )
+            ), ThreadPoolExecutor(max_workers=2) as executor:
+                tuple(
+                    executor.map(
+                        lambda report: engine._upload_phase0_sources(
+                            request, report
+                        ),
+                        reports,
                     )
+                )
 
         self.assertEqual(len(remote_inventory), 1)
         self.assertEqual(sum(len(report.uploaded) for report in reports), 1)
@@ -709,7 +707,7 @@ class TranscriberTests(unittest.TestCase):
                         "subject": request.subject,
                         "title": request.title,
                         "status": "running",
-                        "phases": {phase: "pending" for phase in engine.PHASE_ORDER},
+                        "phases": dict.fromkeys(engine.PHASE_ORDER, "pending"),
                         "phase_files": {},
                         "phase_errors": {},
                         "phase_fingerprints": engine._phase_fingerprints(request, context),
@@ -1661,9 +1659,8 @@ class TranscriberTests(unittest.TestCase):
             engine,
             "_run_nlm_json",
             side_effect=engine.NlmError("nlm notebook query timed out"),
-        ):
-            with self.assertRaises(engine.NlmError) as raised:
-                engine._run_nlm_cli_query(request)
+        ), self.assertRaises(engine.NlmError) as raised:
+            engine._run_nlm_cli_query(request)
 
         self.assertEqual(raised.exception.source_quarantine, ())
 
@@ -1684,9 +1681,8 @@ class TranscriberTests(unittest.TestCase):
             engine,
             "_run_query_once",
             side_effect=engine.NlmError("no queryable sources", (quarantine,)),
-        ) as query_once:
-            with self.assertRaises(engine.PhaseValidationError) as raised:
-                engine.run_nlm_query(query)
+        ) as query_once, self.assertRaises(engine.PhaseValidationError) as raised:
+            engine.run_nlm_query(query)
 
         self.assertEqual(query_once.call_count, 1)
         self.assertEqual(raised.exception.source_quarantine, (quarantine,))

@@ -13,7 +13,6 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
 
 # The repository root VERSION file is the single source of truth. FALLBACK_VERSION
 # only matters when a skill directory is installed on its own, detached from the
@@ -29,7 +28,7 @@ DEFAULT_TIMEOUT = 1.5  # seconds
 FAILED_CHECK_CACHE_TTL = 3600  # 1 hour in seconds
 
 
-def _read_version_file() -> Optional[str]:
+def _read_version_file() -> str | None:
     """Return the version from the nearest VERSION file above this script."""
     for parent in Path(__file__).resolve().parents:
         candidate = parent / VERSION_FILE_NAME
@@ -50,7 +49,7 @@ def get_current_version() -> str:
 __version__ = get_current_version()
 
 
-def parse_version(ver_str: str) -> Tuple[int, ...]:
+def parse_version(ver_str: str) -> tuple[int, ...]:
     """Parse a semantic version string into a tuple of integers."""
     clean = ver_str.strip().lstrip("vV")
     parts = re.findall(r"\d+", clean)
@@ -59,14 +58,14 @@ def parse_version(ver_str: str) -> Tuple[int, ...]:
     return tuple(map(int, parts))
 
 
-def is_newer_version(latest: str, current: Optional[str] = None) -> bool:
+def is_newer_version(latest: str, current: str | None = None) -> bool:
     """Return True if latest version is strictly greater than current version."""
     if current is None:
         current = get_current_version()
     return parse_version(latest) > parse_version(current)
 
 
-def get_cache_file_path(workspace: Optional[Path] = None) -> Path:
+def get_cache_file_path(workspace: Path | None = None) -> Path:
     """Determine the cache file path for version check results."""
     if workspace:
         cache_dir = workspace / ".transcriber-cache"
@@ -78,7 +77,7 @@ def get_cache_file_path(workspace: Optional[Path] = None) -> Path:
     return home_cache / "version_check.json"
 
 
-def fetch_latest_release_from_github(timeout: float = DEFAULT_TIMEOUT) -> Optional[str]:
+def fetch_latest_release_from_github(timeout: float = DEFAULT_TIMEOUT) -> str | None:
     """Fetch the latest release tag from GitHub API."""
     req = urllib.request.Request(
         GITHUB_API_URL,
@@ -95,7 +94,7 @@ def fetch_latest_release_from_github(timeout: float = DEFAULT_TIMEOUT) -> Option
     return None
 
 
-def _write_cache(cache_file: Path, latest_version: Optional[str], now: float) -> None:
+def _write_cache(cache_file: Path, latest_version: str | None, now: float) -> None:
     """Record a check outcome. A null latest_version marks a failed check."""
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -106,11 +105,11 @@ def _write_cache(cache_file: Path, latest_version: Optional[str], now: float) ->
 
 
 def check_for_updates(
-    workspace: Optional[Path] = None,
+    workspace: Path | None = None,
     cache_ttl: int = DEFAULT_CACHE_TTL,
     timeout: float = DEFAULT_TIMEOUT,
     force: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """
     Check if a newer version is available.
     Returns latest version string if an update is available, else None.
@@ -127,7 +126,7 @@ def check_for_updates(
     # Try reading from cache
     if not force and cache_file.is_file():
         try:
-            with open(cache_file, "r", encoding="utf-8") as f:
+            with open(cache_file, encoding="utf-8") as f:
                 cached = json.load(f)
             checked_at = cached.get("checked_at", 0)
             latest_ver = cached.get("latest_version")
@@ -158,7 +157,7 @@ def check_for_updates(
     return None
 
 
-def format_update_notice(latest_version: str, current_version: Optional[str] = None) -> str:
+def format_update_notice(latest_version: str, current_version: str | None = None) -> str:
     """Format a prominent, beautiful CLI update banner."""
     if current_version is None:
         current_version = get_current_version()
@@ -178,7 +177,7 @@ def format_update_notice(latest_version: str, current_version: Optional[str] = N
     return f"\n{top}\n{pad1}\n{sep}\n{pad2}\n{pad3}\n{pad4}\n{pad5}\n{bottom}\n"
 
 
-def print_update_notice_if_available(workspace: Optional[Path] = None, quiet: bool = False) -> None:
+def print_update_notice_if_available(workspace: Path | None = None, quiet: bool = False) -> None:
     """Print the update notification banner to stderr if a newer version is found."""
     if quiet:
         return
