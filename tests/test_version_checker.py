@@ -29,6 +29,17 @@ NEXT_VERSION = "{}.{}.{}".format(
 )
 
 
+# CI sets UNIVERSAL_TRANSCRIBER_NO_UPDATE_CHECK so the suite never reaches the
+# network. These three tests are about the path that variable suppresses, so
+# they clear it (and its npm-style sibling) for their own duration.
+def without_update_suppression(test):
+    cleared = {
+        "UNIVERSAL_TRANSCRIBER_NO_UPDATE_CHECK": "",
+        "NO_UPDATE_NOTIFIER": "",
+    }
+    return patch.dict(os.environ, cleared)(test)
+
+
 class TestVersionChecker(unittest.TestCase):
     def test_version_comes_from_the_version_file(self):
         self.assertEqual(version_checker.get_current_version(), CURRENT_VERSION)
@@ -74,6 +85,7 @@ class TestVersionChecker(unittest.TestCase):
         self.assertIn("╭", notice)
         self.assertIn("╰", notice)
 
+    @without_update_suppression
     def test_check_for_updates_with_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -99,6 +111,7 @@ class TestVersionChecker(unittest.TestCase):
             self.assertIsNone(result_same)
 
     @patch("version_checker.fetch_latest_release_from_github")
+    @without_update_suppression
     def test_check_for_updates_network_fetch_and_cache(self, mock_fetch):
         mock_fetch.return_value = NEXT_VERSION
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -115,6 +128,7 @@ class TestVersionChecker(unittest.TestCase):
             self.assertEqual(cached_data["latest_version"], NEXT_VERSION)
 
     @patch("version_checker.fetch_latest_release_from_github")
+    @without_update_suppression
     def test_failed_check_is_cached_so_offline_runs_skip_the_network(self, mock_fetch):
         mock_fetch.side_effect = OSError("offline")
         with tempfile.TemporaryDirectory() as tmpdir:
