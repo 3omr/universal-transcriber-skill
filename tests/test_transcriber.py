@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 import json
 import multiprocessing
+import os
 import sys
 import tempfile
 import threading
@@ -2663,6 +2664,99 @@ class CombinedBadgeRecordingEvidenceTests(unittest.TestCase):
             any("MCQ 1 [missing_recording_evidence]" in error for error in errors),
             errors,
         )
+
+
+class RemoteInventoryCacheTests(unittest.TestCase):
+    """The launcher runs phase 0 twice per invocation, in two processes."""
+
+    def setUp(self) -> None:
+        self.addCleanup(engine.set_inventory_cache_root, None)
+
+    def test_second_process_reuses_the_cached_inventory(self) -> None:
+        inventory = {"sources": [{"id": "s1", "title": "OPs.pptx"}]}
+        with tempfile.TemporaryDirectory() as root:
+            engine.set_inventory_cache_root(root)
+            with patch.object(
+                engine, "_run_nlm_json", return_value=inventory
+            ) as run_nlm:
+                first = engine._remote_source_inventory("nb-1", {})
+            self.assertEqual(run_nlm.call_count, 1)
+
+            # A separate process would re-read the same cache directory.
+            engine.set_inventory_cache_root(root)
+            with patch.object(engine, "_run_nlm_json") as run_nlm:
+                second = engine._remote_source_inventory("nb-1", {})
+            run_nlm.assert_not_called()
+            self.assertEqual(first, second)
+
+    def test_expired_entries_are_refetched(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine.set_inventory_cache_root(root)
+            with patch.object(engine, "_run_nlm_json", return_value={"sources": []}):
+                engine._remote_source_inventory("nb-1", {})
+            with patch.dict(
+                os.environ, {"TRANSCRIBER_INVENTORY_CACHE_TTL": "0"}, clear=False
+            ):
+                with patch.object(
+                    engine, "_run_nlm_json", return_value={"sources": []}
+                ) as run_nlm:
+                    engine._remote_source_inventory("nb-1", {})
+                self.assertEqual(run_nlm.call_count, 1)
+
+    def test_mutating_nlm_calls_drop_the_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine.set_inventory_cache_root(root)
+            with patch.object(engine, "_run_nlm_json", return_value={"sources": []}):
+                engine._remote_source_inventory("nb-1", {})
+            self.assertIsNotNone(engine._read_cached_inventory("nb-1"))
+
+            completed = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+            with patch.object(engine.subprocess, "run", return_value=completed):
+                with patch.object(
+                    engine, "_find_nlm_executable", return_value="nlm"
+                ):
+                    engine._run_nlm_json(
+                        {}, ["source", "add", "nb-1", "f.pdf"], 10, "nlm source add"
+                    )
+            self.assertIsNone(engine._read_cached_inventory("nb-1"))
+
+    def test_the_cache_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with patch.dict(
+                os.environ,
+                {"TRANSCRIBER_DISABLE_INVENTORY_CACHE": "1"},
+                clear=False,
+            ):
+                engine.set_inventory_cache_root(root)
+            with patch.object(
+                engine, "_run_nlm_json", return_value={"sources": []}
+            ) as run_nlm:
+                engine._remote_source_inventory("nb-1", {})
+                engine._remote_source_inventory("nb-1", {})
+            self.assertEqual(run_nlm.call_count, 2)
+
+
+class PhaseAttemptReportingTests(unittest.TestCase):
+    """The retry loop usually stops at attempt 1; the message said 3."""
+
+    def test_early_exit_reports_the_attempt_actually_spent(self) -> None:
+        error = engine.PhaseValidationError("MCQs", ["bad badge"], attempts=1)
+
+        self.assertIn("failed on 1 attempt of 3", str(error))
+        self.assertIn("stopped early for Agent repair", str(error))
+
+    def test_exhausted_retries_still_report_the_maximum(self) -> None:
+        error = engine.PhaseValidationError(
+            "MCQs", ["bad badge"], attempts=engine.MAX_ATTEMPTS, exhausted=True
+        )
+
+        self.assertIn(f"failed after {engine.MAX_ATTEMPTS} attempts", str(error))
+
+    def test_non_query_failures_claim_no_attempts(self) -> None:
+        error = engine.PhaseValidationError("MCQs", ["bad badge"])
+
+        self.assertIn("MCQs failed:", str(error))
+        self.assertNotIn("attempt", str(error))
 
 
 if __name__ == "__main__":

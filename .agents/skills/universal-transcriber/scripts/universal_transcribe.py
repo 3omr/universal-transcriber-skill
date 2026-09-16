@@ -209,15 +209,35 @@ class PhaseValidationError(ValidationError):
         answer: str = "",
         source_names: tuple[str, ...] = (),
         source_quarantine: tuple["SourceQuarantine", ...] = (),
+        attempts: int | None = None,
+        exhausted: bool = False,
     ) -> None:
         self.phase_name = phase_name
         self.errors = list(errors)
         self.answer = answer
         self.source_names = tuple(source_names)
         self.source_quarantine = tuple(source_quarantine)
+        self.attempts = attempts
+        self.exhausted = exhausted
         super().__init__(
-            f"{phase_name} failed after {MAX_ATTEMPTS} attempts: "
-            + "; ".join(self.errors)
+            f"{phase_name} {self._attempt_summary()}: " + "; ".join(self.errors)
+        )
+
+    def _attempt_summary(self) -> str:
+        """Say how many NotebookLM queries were actually spent.
+
+        The loop stops at the first usable-but-invalid answer so the Agent can
+        repair it in flight, which is usually attempt 1. Reporting the maximum
+        every time made a single query look like three.
+        """
+        if self.attempts is None:
+            return "failed"
+        if self.exhausted:
+            return f"failed after {self.attempts} attempts"
+        plural = "attempt" if self.attempts == 1 else "attempts"
+        return (
+            f"failed on {self.attempts} {plural} of {MAX_ATTEMPTS} "
+            "(stopped early for Agent repair)"
         )
 
 
@@ -617,6 +637,78 @@ def _nlm_command(config: dict[str, Any], arguments: list[str]) -> list[str]:
     return command
 
 
+INVENTORY_CACHE_TTL_SECONDS = 180
+# nlm verbs that change what a notebook contains. Any of them makes a cached
+# source inventory wrong, so the cache is dropped the moment one succeeds.
+MUTATING_NLM_VERBS = frozenset(
+    {"add", "create", "delete", "import", "remove", "rm", "upload"}
+)
+_INVENTORY_CACHE_ROOT: Path | None = None
+
+
+def set_inventory_cache_root(sources_root: str | None) -> None:
+    """Point the remote-inventory cache at this run's module cache directory.
+
+    The launcher runs the read-only audit and the real run as two processes, so
+    the cache has to live on disk for the second one to benefit from the first.
+    """
+    global _INVENTORY_CACHE_ROOT
+    if not sources_root or os.environ.get("TRANSCRIBER_DISABLE_INVENTORY_CACHE"):
+        _INVENTORY_CACHE_ROOT = None
+        return
+    _INVENTORY_CACHE_ROOT = Path(sources_root) / ".transcriber-cache" / "inventory"
+
+
+def _inventory_cache_ttl() -> int:
+    raw = os.environ.get("TRANSCRIBER_INVENTORY_CACHE_TTL")
+    if raw and raw.strip().isdigit():
+        return int(raw.strip())
+    return INVENTORY_CACHE_TTL_SECONDS
+
+
+def _inventory_cache_file(notebook_uuid: str) -> Path | None:
+    if _INVENTORY_CACHE_ROOT is None or not notebook_uuid:
+        return None
+    key = hashlib.sha256(notebook_uuid.encode("utf-8")).hexdigest()[:16]
+    return _INVENTORY_CACHE_ROOT / f"sources-{key}.json"
+
+
+def _read_cached_inventory(notebook_uuid: str) -> Any | None:
+    path = _inventory_cache_file(notebook_uuid)
+    if path is None:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - float(payload["fetched_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if age < 0 or age > _inventory_cache_ttl():
+        return None
+    return payload.get("inventory")
+
+
+def _store_cached_inventory(notebook_uuid: str, inventory: Any) -> None:
+    path = _inventory_cache_file(notebook_uuid)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(path, {"fetched_at": time.time(), "inventory": inventory})
+    except OSError:
+        # A cache that cannot be written is a missed optimisation, never a
+        # reason to fail the run.
+        pass
+
+
+def invalidate_inventory_cache() -> None:
+    if _INVENTORY_CACHE_ROOT is None:
+        return
+    try:
+        shutil.rmtree(_INVENTORY_CACHE_ROOT)
+    except OSError:
+        pass
+
+
 def _run_nlm_json(
     config: dict[str, Any],
     arguments: list[str],
@@ -637,6 +729,8 @@ def _run_nlm_json(
     if completed.returncode != 0:
         message = completed.stderr.strip() or completed.stdout.strip()
         raise NlmError(f"{operation} failed: {message[:500]}")
+    if MUTATING_NLM_VERBS.intersection(arguments):
+        invalidate_inventory_cache()
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -765,8 +859,11 @@ def _source_items(payload: Any) -> list[dict[str, Any]]:
 def _remote_source_inventory(
     notebook_uuid: str, config: dict[str, Any] | None = None
 ) -> Any:
+    cached = _read_cached_inventory(notebook_uuid)
+    if cached is not None:
+        return cached
     try:
-        return _run_nlm_json(
+        inventory = _run_nlm_json(
             config or {},
             ["source", "list", notebook_uuid],
             120,
@@ -774,6 +871,8 @@ def _remote_source_inventory(
         )
     except NlmError as error:
         raise Phase0Error(str(error)) from error
+    _store_cached_inventory(notebook_uuid, inventory)
+    return inventory
 
 
 def _remote_source_title(source_entry: dict[str, Any]) -> str:
@@ -3232,6 +3331,7 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                     last_answer,
                     last_source_names,
                     last_source_quarantine,
+                    attempts=attempt,
                 ) from error
             if (
                 query.phase_name in {"MCQs", "Written Questions"}
@@ -3251,8 +3351,10 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
 
         if last_errors and last_answer:
             print(
-                f"[Recovery] {query.phase_name} produced raw text with {len(last_errors)} validation issue(s); "
-                "bypassing redundant LLM query retries for immediate Agent in-flight repair"
+                f"[Recovery] {query.phase_name} produced raw text with "
+                f"{len(last_errors)} validation issue(s) on attempt "
+                f"{attempt}/{MAX_ATTEMPTS}; bypassing redundant LLM query "
+                "retries for immediate Agent in-flight repair"
             )
             raise PhaseValidationError(
                 query.phase_name,
@@ -3260,6 +3362,7 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                 last_answer,
                 last_source_names,
                 last_source_quarantine,
+                attempts=attempt,
             )
 
         if attempt < MAX_ATTEMPTS:
@@ -3276,6 +3379,8 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
         last_answer,
         last_source_names,
         last_source_quarantine,
+        attempts=MAX_ATTEMPTS,
+        exhausted=True,
     )
 
 
@@ -7164,6 +7269,7 @@ def main() -> int:
     if args.recovery_response and args.retry_phase:
         parser.error("Agent recovery cannot be combined with --retry-phase")
     request = _run_request(args, config, parser)
+    set_inventory_cache_root(request.sources_root)
     _print_run_summary(request)
     try:
         if request.audit_only:

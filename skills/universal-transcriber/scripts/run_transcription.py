@@ -899,14 +899,33 @@ def _run_audit(command: list[str], source_root: Path) -> int:
     )
 
 
-def _run_transcription(command: list[str], source_root: Path) -> int:
-    audit_exit_code = _run_audit(command, source_root)
-    if audit_exit_code != 0:
-        return audit_exit_code
-    print(
-        "[Launcher] Audit passed; starting the five transcription phases...",
-        flush=True,
-    )
+def _needs_preflight_audit(invocation: EngineInvocation) -> bool:
+    """Only a run that can upload sources needs the read-only preflight.
+
+    --finalize-draft reads an existing draft and --recovery-phase applies an
+    Agent-repaired response to a checkpoint. Neither uploads anything, so the
+    separate audit subprocess was ~18s of NotebookLM traffic spent to validate
+    a run that was never going to touch the notebook.
+    """
+    return not (invocation.finalize_draft or invocation.recovery_phase)
+
+
+def _run_transcription(
+    command: list[str], source_root: Path, invocation: EngineInvocation
+) -> int:
+    if _needs_preflight_audit(invocation):
+        audit_exit_code = _run_audit(command, source_root)
+        if audit_exit_code != 0:
+            return audit_exit_code
+        print(
+            "[Launcher] Audit passed; starting the five transcription phases...",
+            flush=True,
+        )
+    else:
+        print(
+            "[Launcher] Local-only invocation; skipping the read-only audit.",
+            flush=True,
+        )
     return _run_engine(
         command, source_root, TRANSCRIPTION_TIMEOUT_SECONDS, "Transcription"
     )
@@ -1048,7 +1067,7 @@ def _execute_recording(
     command = _engine_command(invocation)
     if args.audit_only:
         return _run_audit(command, context.module.paths.root)
-    return _run_transcription(command, context.module.paths.root)
+    return _run_transcription(command, context.module.paths.root, invocation)
 
 
 def _execute_selected(
