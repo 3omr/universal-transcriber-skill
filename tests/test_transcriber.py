@@ -31,6 +31,17 @@ engine = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = engine
 SPEC.loader.exec_module(engine)
 
+# `nlm` invocation, config loading and the inventory cache live in nlm_client
+# now. The engine re-exports them, so `engine.load_config` is still the name
+# every caller uses -- but a test that replaces one has to replace it where
+# that function resolves its own globals, which is here.
+import nlm_client  # noqa: E402
+
+# The phase query loop -- scope splitting, retry, quarantine -- moved to
+# query_execution. Same reasoning as nlm_client above: replace a function where
+# it resolves its globals.
+import query_execution  # noqa: E402
+
 
 def local_source(name: str, role: str, ocr_status: str | None = None):
     report = (
@@ -176,7 +187,7 @@ class TranscriberTests(unittest.TestCase):
 
     def test_numeric_notebooklm_source_statuses_are_normalized(self) -> None:
         with patch.object(
-            engine,
+            nlm_client,
             "_remote_source_inventory",
             return_value=[
                 {"id": "ready", "title": "Ready.pdf", "status": 2},
@@ -927,7 +938,7 @@ class TranscriberTests(unittest.TestCase):
         )
 
         with patch.object(
-            engine,
+            query_execution,
             "_run_nlm_json",
             side_effect=engine.NlmError(
                 "The query request is invalid. Check the notebook ID, source IDs, and query arguments."
@@ -961,7 +972,7 @@ class TranscriberTests(unittest.TestCase):
                 "phase response validator."
             )
 
-        with patch.object(engine, "_run_query_once", side_effect=reject_manifest_then_answer):
+        with patch.object(query_execution, "_run_query_once", side_effect=reject_manifest_then_answer):
             result = engine.run_nlm_query(query)
 
         self.assertIn("grounded MCQ answer", result.answer)
@@ -1399,7 +1410,7 @@ class TranscriberTests(unittest.TestCase):
         )
 
         with patch.object(
-            engine,
+            query_execution,
             "_run_nlm_json",
             side_effect=[
                 {"answer": "### MCQ 1\nfirst"},
@@ -1475,7 +1486,7 @@ class TranscriberTests(unittest.TestCase):
                 return {"answer": "### MCQ 1\nfrom two"}
             return {"answer": "### MCQ 1\nunscoped"}
 
-        with patch.object(engine, "_run_nlm_json", side_effect=query_cli):
+        with patch.object(query_execution, "_run_nlm_json", side_effect=query_cli):
             merged = engine._run_nlm_cli_query(request)
 
         self.assertIn("from one", merged.answer)
@@ -1508,7 +1519,7 @@ class TranscriberTests(unittest.TestCase):
             calls.append(arguments)
             return {"answer": "### MCQ 1\nfrom batch"}
 
-        with patch.object(engine, "_run_nlm_json", side_effect=query_cli):
+        with patch.object(query_execution, "_run_nlm_json", side_effect=query_cli):
             merged = engine._run_nlm_cli_query(request)
 
         source_arguments = [
@@ -1547,7 +1558,7 @@ class TranscriberTests(unittest.TestCase):
                 raise engine.NlmError("source group was rejected")
             return {"answer": f"### MCQ 1\nfrom {selected_ids[0]}"}
 
-        with patch.object(engine, "_run_nlm_json", side_effect=query_cli):
+        with patch.object(query_execution, "_run_nlm_json", side_effect=query_cli):
             merged = engine._run_nlm_cli_query(request)
 
         for source_id in source_ids:
@@ -1581,7 +1592,7 @@ class TranscriberTests(unittest.TestCase):
                 raise engine.NlmError("invalid source id bad-source")
             return {"answer": f"### MCQ 1\nfrom {selected_ids[0]}"}
 
-        with patch.object(engine, "_run_nlm_json", side_effect=query_cli):
+        with patch.object(query_execution, "_run_nlm_json", side_effect=query_cli):
             merged = engine._run_nlm_cli_query(request)
 
         self.assertIn("from source-one", merged.answer)
@@ -1633,7 +1644,7 @@ class TranscriberTests(unittest.TestCase):
             selected_ids = arguments[arguments.index("--source-ids") + 1].split(",")
             raise engine.NlmError(f"invalid source id {selected_ids[0]}")
 
-        with patch.object(engine, "_run_nlm_json", side_effect=reject_selected_source):
+        with patch.object(query_execution, "_run_nlm_json", side_effect=reject_selected_source):
             with self.assertRaises(engine.NlmError) as raised:
                 engine._run_nlm_cli_query(request)
 
@@ -1661,7 +1672,7 @@ class TranscriberTests(unittest.TestCase):
         )
 
         with patch.object(
-            engine,
+            query_execution,
             "_run_nlm_json",
             side_effect=engine.NlmError("nlm notebook query timed out"),
         ), self.assertRaises(engine.NlmError) as raised:
@@ -1683,7 +1694,7 @@ class TranscriberTests(unittest.TestCase):
             source_names=("bad.txt",),
         )
         with patch.object(
-            engine,
+            query_execution,
             "_run_query_once",
             side_effect=engine.NlmError("no queryable sources", (quarantine,)),
         ) as query_once, self.assertRaises(engine.PhaseValidationError) as raised:
@@ -1703,7 +1714,7 @@ class TranscriberTests(unittest.TestCase):
         )
 
         with patch.object(
-            engine, "_run_nlm_json", return_value={"answer": engine.NO_MCQS}
+            query_execution, "_run_nlm_json", return_value={"answer": engine.NO_MCQS}
         ):
             result = engine._run_nlm_cli_query(request)
 
@@ -2679,14 +2690,14 @@ class RemoteInventoryCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             engine.set_inventory_cache_root(root)
             with patch.object(
-                engine, "_run_nlm_json", return_value=inventory
+                nlm_client, "_run_nlm_json", return_value=inventory
             ) as run_nlm:
                 first = engine._remote_source_inventory("nb-1", {})
             self.assertEqual(run_nlm.call_count, 1)
 
             # A separate process would re-read the same cache directory.
             engine.set_inventory_cache_root(root)
-            with patch.object(engine, "_run_nlm_json") as run_nlm:
+            with patch.object(nlm_client, "_run_nlm_json") as run_nlm:
                 second = engine._remote_source_inventory("nb-1", {})
             run_nlm.assert_not_called()
             self.assertEqual(first, second)
@@ -2694,13 +2705,13 @@ class RemoteInventoryCacheTests(unittest.TestCase):
     def test_expired_entries_are_refetched(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             engine.set_inventory_cache_root(root)
-            with patch.object(engine, "_run_nlm_json", return_value={"sources": []}):
+            with patch.object(nlm_client, "_run_nlm_json", return_value={"sources": []}):
                 engine._remote_source_inventory("nb-1", {})
             with patch.dict(
                 os.environ, {"TRANSCRIBER_INVENTORY_CACHE_TTL": "0"}, clear=False
             ):
                 with patch.object(
-                    engine, "_run_nlm_json", return_value={"sources": []}
+                    nlm_client, "_run_nlm_json", return_value={"sources": []}
                 ) as run_nlm:
                     engine._remote_source_inventory("nb-1", {})
                 self.assertEqual(run_nlm.call_count, 1)
@@ -2708,14 +2719,14 @@ class RemoteInventoryCacheTests(unittest.TestCase):
     def test_mutating_nlm_calls_drop_the_cache(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             engine.set_inventory_cache_root(root)
-            with patch.object(engine, "_run_nlm_json", return_value={"sources": []}):
+            with patch.object(nlm_client, "_run_nlm_json", return_value={"sources": []}):
                 engine._remote_source_inventory("nb-1", {})
             self.assertIsNotNone(engine._read_cached_inventory("nb-1"))
 
             completed = SimpleNamespace(returncode=0, stdout="{}", stderr="")
-            with patch.object(engine.subprocess, "run", return_value=completed):
+            with patch.object(nlm_client.subprocess, "run", return_value=completed):
                 with patch.object(
-                    engine, "_find_nlm_executable", return_value="nlm"
+                    nlm_client, "_find_nlm_executable", return_value="nlm"
                 ):
                     engine._run_nlm_json(
                         {}, ["source", "add", "nb-1", "f.pdf"], 10, "nlm source add"
@@ -2731,7 +2742,7 @@ class RemoteInventoryCacheTests(unittest.TestCase):
             ):
                 engine.set_inventory_cache_root(root)
             with patch.object(
-                engine, "_run_nlm_json", return_value={"sources": []}
+                nlm_client, "_run_nlm_json", return_value={"sources": []}
             ) as run_nlm:
                 engine._remote_source_inventory("nb-1", {})
                 engine._remote_source_inventory("nb-1", {})
@@ -2923,7 +2934,7 @@ class LoadConfigTests(unittest.TestCase):
             path = Path(root) / "config.json"
             if contents is not None:
                 path.write_text(contents, encoding="utf-8")
-            with patch.object(engine, "CONFIG_PATH", str(path)):
+            with patch.object(nlm_client, "CONFIG_PATH", str(path)):
                 return engine.load_config()
 
     def test_a_missing_file_yields_the_defaults(self) -> None:
