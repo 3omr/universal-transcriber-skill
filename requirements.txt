@@ -1,0 +1,9 @@
+# Python packages required by the skills.
+#
+# System tooling (nlm, libreoffice, ocrmypdf, poppler-utils, ghostscript,
+# ffmpeg) is not installable from PyPI -- see the Prerequisites section of
+# README.md, or run:
+#   python3 skills/universal-transcriber/scripts/run_transcription.py --doctor
+
+# transcriber-anki: builds native .apkg decks. Without it only .tsv export works.
+genanki>=0.13,<1.0
