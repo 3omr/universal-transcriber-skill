@@ -25,7 +25,8 @@ manager. Install these before your first transcription:
 | **ghostscript** | Compressing PDFs over the NotebookLM upload limit | `apt install ghostscript` / `brew install ghostscript` |
 | **ffmpeg** | Normalizing recordings NotebookLM will not accept | `apt install ffmpeg` / `brew install ffmpeg` |
 
-Python packages (only `genanki`, for native `.apkg` decks):
+Python packages (`genanki` for native `.apkg` decks, `reportlab` to render
+plain-text question banks as PDFs before upload):
 
 ```bash
 pip install -r requirements.txt

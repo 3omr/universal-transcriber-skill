@@ -96,6 +96,14 @@ DEPENDENCIES: tuple[Dependency, ...] = (
         required=False,
         python_module="genanki",
     ),
+    Dependency(
+        name="reportlab",
+        executables=(),
+        purpose="Rendering plain-text question banks to PDF before upload",
+        install_hint="pip install -r requirements.txt",
+        required=False,
+        python_module="reportlab",
+    ),
 )
 
 

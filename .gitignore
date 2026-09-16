@@ -8,6 +8,8 @@
 !LICENSE
 !requirements.txt
 !skills.sh.json
+# The single source of truth for the skill version (scripts/bump-version.sh).
+!VERSION
 !.github/
 !.github/**
 
