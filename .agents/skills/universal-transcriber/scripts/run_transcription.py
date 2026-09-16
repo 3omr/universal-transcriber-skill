@@ -30,6 +30,7 @@ from module_registry import (
     ModuleConfigError,
     configured_slide,
     discover_modules,
+    normalize_module_name,
     resolve_module,
 )
 from version_checker import (
@@ -1151,6 +1152,81 @@ def _execute_selected(
     return 0
 
 
+def _whisper_recording(args: argparse.Namespace, context: LauncherContext) -> Path:
+    """The recording to transcribe: --lecture matched against Lecture/."""
+    lecture_dir = context.module.paths.lecture
+    if not args.lecture:
+        raise LauncherError("--engine whisper needs --lecture naming the recording")
+    wanted = normalize_module_name(args.lecture)
+    candidates = [
+        path
+        for path in sorted(lecture_dir.glob("*"))
+        if path.is_file() and wanted in normalize_module_name(path.stem)
+    ]
+    recordings = [
+        path
+        for path in candidates
+        if path.suffix.casefold() in {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".mp4", ".mkv"}
+    ]
+    if not recordings:
+        raise LauncherError(f"No recording under {lecture_dir} matches {args.lecture!r}")
+    if len(recordings) > 1:
+        names = ", ".join(path.name for path in recordings)
+        raise LauncherError(f"{args.lecture!r} matches several recordings: {names}")
+    return recordings[0]
+
+
+def _run_local_transcription(args: argparse.Namespace, context: LauncherContext) -> int:
+    """Transcribe a recording verbatim on this machine and write it out.
+
+    This stops at the raw text on purpose. Restructuring it into the five
+    sections here would mean paraphrasing the recording before anyone had read
+    it, and the doctor's exact wording is the one thing the exam-style prompts
+    treat as authoritative.
+    """
+    from engines import EngineError, EngineUnavailable, get_transcription_engine
+
+    recording = _whisper_recording(args, context)
+    engine = get_transcription_engine("whisper", model_size=args.whisper_model)
+    if not engine.is_available():
+        from engines.whisper import INSTALL_HINT
+
+        print(f"[!] {INSTALL_HINT}", file=sys.stderr)
+        return 1
+
+    print(f"[Whisper] Transcribing {recording.name} with the {args.whisper_model} model...")
+    try:
+        result = engine.transcribe(recording, language=args.language)
+    except (EngineError, EngineUnavailable) as error:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+
+    target = (
+        Path(args.output).expanduser()
+        if args.output
+        else context.module.paths.transcripts / f"{recording.stem}.verbatim.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = result.with_timestamps() if args.timestamps else result.text
+    header = (
+        f"# Verbatim transcript — {recording.stem}\n\n"
+        f"> Raw {result.language or 'auto-detected'} speech from `{recording.name}`, "
+        f"transcribed locally with faster-whisper ({result.model}). Nothing here "
+        f"has been summarised or reordered.\n\n"
+    )
+    target.write_text(header + body + "\n", encoding="utf-8")
+    minutes = int(result.duration // 60)
+    print(
+        f"[Whisper] {result.word_count} words from {minutes} minute(s) of audio "
+        f"-> {target}"
+    )
+    print(
+        "\nThis is the raw recording, not a transcript in the 5-section format. "
+        "Write the sections from it."
+    )
+    return 0
+
+
 def _requested_years(raw: str | None) -> tuple[int, ...]:
     """Parse --years as either a list (2022,2024) or a range (2020-2024)."""
     if not raw:
@@ -1410,6 +1486,37 @@ def _parser() -> argparse.ArgumentParser:
         help="DPI for --extract-figures (default 150)",
     )
     parser.add_argument(
+        "--engine",
+        choices=("notebooklm", "whisper"),
+        default="notebooklm",
+        help=(
+            "Which backend to use. notebooklm (default) runs the five-section "
+            "pipeline. whisper transcribes the recording verbatim on this "
+            "machine and stops there, leaving the Agent to write the sections "
+            "from it -- no account, no network, and no dependency on an "
+            "unofficial API staying up"
+        ),
+    )
+    parser.add_argument(
+        "--whisper-model",
+        default="medium",
+        help="faster-whisper model size for --engine whisper (default medium)",
+    )
+    parser.add_argument(
+        "--language",
+        default="",
+        help=(
+            "Force a language for --engine whisper. Left unset the recogniser "
+            "follows the recording, which is what these lectures need -- they "
+            "switch between Arabic and English mid-sentence"
+        ),
+    )
+    parser.add_argument(
+        "--timestamps",
+        action="store_true",
+        help="Write the verbatim transcript with a timestamp per segment",
+    )
+    parser.add_argument(
         "--question-bank",
         action="store_true",
         help=(
@@ -1549,6 +1656,8 @@ def main() -> int:
             return _run_figure_extraction(args, context)
         if args.question_bank or args.exam:
             return _run_question_bank(args, context)
+        if args.engine == "whisper":
+            return _run_local_transcription(args, context)
         if args.auto_manifest:
             if args.source_manifest:
                 raise LauncherError("--auto-manifest cannot be combined with --source-manifest")

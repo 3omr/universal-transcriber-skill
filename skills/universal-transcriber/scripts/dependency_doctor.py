@@ -189,6 +189,14 @@ DEPENDENCIES: tuple[Dependency, ...] = (
         python_module="genanki",
     ),
     Dependency(
+        name="faster-whisper",
+        executables=(),
+        purpose="Local verbatim transcription (--engine whisper), no account needed",
+        install_hint="pip install faster-whisper",
+        required=False,
+        python_module="faster_whisper",
+    ),
+    Dependency(
         name="openpyxl",
         executables=(),
         purpose="Excel export of the question bank (--format xlsx)",

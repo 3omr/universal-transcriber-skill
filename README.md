@@ -123,6 +123,32 @@ nine pages.
 Pass `--slides` to point at a specific deck, `--all-slide-pages` to render
 everything, and `--figure-resolution` to change the DPI (default 150).
 
+### Transcribing locally, without NotebookLM
+
+Everything in this tool has gone through NotebookLM, driven by `nlm` — a
+reverse-engineered client for a service with no public API. When that breaks,
+the tool stops. `--engine whisper` is the second path:
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module toxo --engine whisper --lecture "OPs" --timestamps
+```
+
+It transcribes the recording **verbatim on your machine** — no account, no
+upload, no network — and stops there, writing `<lecture>.verbatim.md`. It does
+not try to produce the 5-section transcript: the Agent writes those sections
+from the raw text.
+
+That division is deliberate. Restructuring the recording before anyone has read
+it would mean paraphrasing the doctor, and the doctor's exact wording is the one
+thing the exam-style prompts treat as authoritative — `الدكتور قال نصاً` is a
+claim the transcript makes, and it has to stay true.
+
+Needs `pip install faster-whisper`. `--whisper-model` picks the model size
+(default `medium`; the lectures switch between Arabic and English mid-sentence
+and the smaller models get the drug names wrong). Leave `--language` unset so
+the recogniser follows the recording rather than being pinned to one language.
+
 ### The module's question bank
 
 A question used to exist only inside the transcript that produced it. That is
