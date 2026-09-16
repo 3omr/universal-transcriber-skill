@@ -2917,7 +2917,42 @@ def _is_generic_query_argument_error(error: NlmError | TimeoutError) -> bool:
     return "query request is invalid" in message and not error.source_quarantine
 
 
-def run_nlm_query(query: PhaseQuery) -> QueryResult:
+_PHASE_ENGINE: Any | None = None
+
+
+def set_phase_engine(engine: Any | None) -> None:
+    """Choose which backend answers phase prompts. None restores NotebookLM.
+
+    The retry, repair, quarantine and checkpoint machinery below is
+    engine-neutral and must stay that way: an engine does the single call, and
+    everything that decides whether to call again lives here.
+    """
+    global _PHASE_ENGINE
+    _PHASE_ENGINE = engine
+
+
+def get_phase_engine() -> Any:
+    global _PHASE_ENGINE
+    if _PHASE_ENGINE is None:
+        from engines import get_phase_engine as _build
+
+        # Hand the engine this module's own single-call function rather than
+        # letting it import universal_transcribe for itself. The test suite
+        # loads the engine under its own module name, so a fresh import would
+        # produce a second copy of it -- and every patch the tests apply would
+        # land on the copy nobody is running.
+        #
+        # Looked up through the module globals on each call, not captured once:
+        # rebinding _run_query_once has always taken effect immediately, and
+        # caching the reference here would silently break that.
+        def _call(query: PhaseQuery, query_text: str) -> QueryResult:
+            return _run_query_once(query, query_text)
+
+        _PHASE_ENGINE = _build(runner=_call)
+    return _PHASE_ENGINE
+
+
+def run_phase_query(query: PhaseQuery) -> QueryResult:
     repair_context = ""
     active_query_text = query.query_text
     compact_retry_used = False
@@ -2928,9 +2963,14 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             active_query = replace(query, query_text=active_query_text)
-            query_result = _run_query_once(
-                active_query, _query_text_for_attempt(active_query, repair_context)
+            # The engine receives the exact text this attempt should send, so
+            # that a backend only has to answer a prompt -- never to work out
+            # which prompt it is on.
+            dispatch_query = replace(
+                active_query,
+                query_text=_query_text_for_attempt(active_query, repair_context),
             )
+            query_result = get_phase_engine().run_phase(dispatch_query)
             if query.normalizer:
                 query_result = query.normalizer(query_result)
             last_answer = query_result.answer
@@ -5741,6 +5781,12 @@ def _local_source_fingerprints(report: Phase0Report) -> list[dict[str, Any]]:
             }
         )
     return sorted(fingerprints, key=lambda item: str(item["relative_path"]).casefold())
+
+
+# The name every caller has used since before there was more than one backend.
+# Kept deliberately: removing it is a breaking change and belongs in its own
+# commit, per the note at the top of tests/test_engine_contract.py.
+run_nlm_query = run_phase_query
 
 
 def _phase_slug(phase: str) -> str:
