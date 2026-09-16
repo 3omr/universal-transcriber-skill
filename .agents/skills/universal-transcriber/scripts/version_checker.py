@@ -15,16 +15,39 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-__version__ = "1.3.0"
+# The repository root VERSION file is the single source of truth. FALLBACK_VERSION
+# only matters when a skill directory is installed on its own, detached from the
+# repository root -- keep the two in step with scripts/bump-version.sh.
+FALLBACK_VERSION = "1.3.0"
+VERSION_FILE_NAME = "VERSION"
 REPO_NAME = "3omr/universal-transcriber-skill"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_NAME}/releases/latest"
 DEFAULT_CACHE_TTL = 86400  # 24 hours in seconds
 DEFAULT_TIMEOUT = 1.5  # seconds
+# How long to wait before retrying a check that could not reach GitHub, so an
+# offline run does not pay the network timeout on every single invocation.
+FAILED_CHECK_CACHE_TTL = 3600  # 1 hour in seconds
+
+
+def _read_version_file() -> Optional[str]:
+    """Return the version from the nearest VERSION file above this script."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / VERSION_FILE_NAME
+        if candidate.is_file():
+            try:
+                version = candidate.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            return version or None
+    return None
 
 
 def get_current_version() -> str:
     """Return the current local version string."""
-    return __version__
+    return _read_version_file() or FALLBACK_VERSION
+
+
+__version__ = get_current_version()
 
 
 def parse_version(ver_str: str) -> Tuple[int, ...]:
@@ -39,7 +62,7 @@ def parse_version(ver_str: str) -> Tuple[int, ...]:
 def is_newer_version(latest: str, current: Optional[str] = None) -> bool:
     """Return True if latest version is strictly greater than current version."""
     if current is None:
-        current = __version__
+        current = get_current_version()
     return parse_version(latest) > parse_version(current)
 
 
@@ -60,7 +83,7 @@ def fetch_latest_release_from_github(timeout: float = DEFAULT_TIMEOUT) -> Option
     req = urllib.request.Request(
         GITHUB_API_URL,
         headers={
-            "User-Agent": f"universal-transcriber/{__version__}",
+            "User-Agent": f"universal-transcriber/{get_current_version()}",
             "Accept": "application/vnd.github.v3+json",
         },
     )
@@ -70,6 +93,16 @@ def fetch_latest_release_from_github(timeout: float = DEFAULT_TIMEOUT) -> Option
             tag = data.get("tag_name", "")
             return tag.lstrip("vV") if tag else None
     return None
+
+
+def _write_cache(cache_file: Path, latest_version: Optional[str], now: float) -> None:
+    """Record a check outcome. A null latest_version marks a failed check."""
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump({"latest_version": latest_version, "checked_at": now}, f)
+    except Exception:
+        pass
 
 
 def check_for_updates(
@@ -98,37 +131,37 @@ def check_for_updates(
                 cached = json.load(f)
             checked_at = cached.get("checked_at", 0)
             latest_ver = cached.get("latest_version")
-            if now - checked_at < cache_ttl and latest_ver:
-                if is_newer_version(latest_ver):
-                    return latest_ver
+            if latest_ver:
+                if now - checked_at < cache_ttl:
+                    if is_newer_version(latest_ver):
+                        return latest_ver
+                    return None
+            elif now - checked_at < FAILED_CHECK_CACHE_TTL:
+                # The previous check could not reach GitHub. Skip the network
+                # round trip rather than stalling every run for the timeout.
                 return None
         except Exception:
             pass
 
     # Query GitHub
+    latest_ver = None
     try:
         latest_ver = fetch_latest_release_from_github(timeout=timeout)
-        if latest_ver:
-            # Write to cache
-            try:
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump({"latest_version": latest_ver, "checked_at": now}, f)
-            except Exception:
-                pass
-
-            if is_newer_version(latest_ver):
-                return latest_ver
     except Exception:
-        pass
+        latest_ver = None
 
+    # Record the outcome either way; a null latest_version marks a failed check.
+    _write_cache(cache_file, latest_ver, now)
+
+    if latest_ver and is_newer_version(latest_ver):
+        return latest_ver
     return None
 
 
 def format_update_notice(latest_version: str, current_version: Optional[str] = None) -> str:
     """Format a prominent, beautiful CLI update banner."""
     if current_version is None:
-        current_version = __version__
+        current_version = get_current_version()
 
     line1 = f" 🚀 Update available! v{current_version} → v{latest_version} "
     width = max(len(line1), len(f"    npx skills update {REPO_NAME}")) + 4
