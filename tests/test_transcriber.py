@@ -1768,6 +1768,29 @@ class TranscriberTests(unittest.TestCase):
         )
         self.assertEqual(recovery["source_quarantine"][0]["source_name"], "bad.txt")
 
+    def test_phase_failure_without_quarantine_still_writes_recovery_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = Path(temporary_directory)
+            checkpoint = {"phases": {}, "phase_errors": {}}
+
+            def failed_query():
+                raise engine.NlmError("notebook is unreachable")
+
+            with self.assertRaises(engine.PhaseValidationError):
+                engine._execute_checkpointed_phase(
+                    "guide", failed_query, run_dir, checkpoint
+                )
+
+            saved = json.loads((run_dir / "checkpoint.json").read_text())
+            self.assertTrue(
+                (run_dir / "phase-guide-recovery.md").is_file(),
+                "a phase that fails without a quarantine must still leave a "
+                "recovery bundle for the Agent to repair from",
+            )
+            self.assertTrue((run_dir / "phase-guide-errors.json").is_file())
+
+        self.assertEqual(saved["phases"]["guide"], "failed")
+
     def test_quarantined_source_is_deleted_and_replaced_from_local_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

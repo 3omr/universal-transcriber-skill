@@ -8,7 +8,6 @@ be included in a lecture by itself.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +20,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator
+
+from file_lock import exclusive_file_lock
 
 
 class PreparationError(RuntimeError):
@@ -91,11 +92,9 @@ def automatic_preparation_manifest(source_root: str | Path) -> dict[str, list[di
 @contextmanager
 def _artifact_lock(cache_root: Path, destination: Path) -> Iterator[None]:
     lock_directory = cache_root / "locks"
-    lock_directory.mkdir(parents=True, exist_ok=True)
     lock_key = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:16]
     lock_path = lock_directory / f"artifact-{lock_key}.lock"
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    with exclusive_file_lock(lock_path):
         yield
 
 

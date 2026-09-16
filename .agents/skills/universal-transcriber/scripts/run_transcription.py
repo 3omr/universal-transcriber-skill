@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -14,12 +13,13 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
 
+from file_lock import exclusive_file_lock
 from module_registry import (
     ModuleConfig,
     ModuleConfigError,
@@ -918,11 +918,12 @@ def _lecture_lock(
 ) -> Iterator[None]:
     lecture_key = _lecture_key(module, recording, manifest)
     lock_directory = module.paths.root / ".transcriber-cache" / "locks"
-    lock_directory.mkdir(parents=True, exist_ok=True)
     lock_path = lock_directory / f"lecture-{lecture_key}.lock"
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
+    with ExitStack() as stack:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file = stack.enter_context(
+                exclusive_file_lock(lock_path, blocking=False)
+            )
         except BlockingIOError as error:
             title = manifest.title if manifest else recording.title
             raise LauncherError(
