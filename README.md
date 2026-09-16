@@ -60,6 +60,17 @@ defaults rather than ignoring it quietly.
 | `emoji_by_subject` | Emoji appended to each transcript filename |
 | `question_coverage_blocks` | `true` makes a below-floor question yield fail the run instead of warning |
 
+### Checking a module's transcripts
+
+```bash
+scripts/audit-transcripts.sh toxo
+```
+
+Prints one row per transcript: section count, MCQ/written/IMP/combined-badge
+counts, question coverage against `Questions/`, and how many `###` headings
+repeat. A `LOW` mark means the extraction looks thin next to the rest of the
+module and is worth re-running — it is a prompt to look, not a verdict.
+
 ---
 
 ## ⚡ Quick Install (تثبيت السكيل)
