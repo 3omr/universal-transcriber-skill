@@ -25,6 +25,17 @@ from source_sync import (
 )
 
 
+def _why(report) -> str:
+    """Explain a status mismatch. A bare 'partial' != 'planned' names nothing."""
+    lines = [f"status={report.status!r}", f"errors={report.errors!r}"]
+    for source in report.sources:
+        lines.append(
+            f"  source path={source.path!r} status={source.status!r} "
+            f"action={source.action!r} notes={getattr(source, 'notes', '')!r}"
+        )
+    return "\n".join(lines)
+
+
 class SourceSyncTests(unittest.TestCase):
     def test_apply_replaces_one_conflicting_converted_remote_source(self) -> None:
         source = engine.LocalSource(
@@ -120,7 +131,7 @@ class SourceSyncTests(unittest.TestCase):
 
     def test_apply_requires_explicit_agent_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Lecture").mkdir()
             (root / "Lecture" / "lecture.mp3").write_bytes(b"audio")
             manifest = self._manifest(
@@ -133,7 +144,7 @@ class SourceSyncTests(unittest.TestCase):
 
     def test_audit_plans_ppsx_conversion_without_writing_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Lecture").mkdir()
             slide = root / "Lecture" / "psychotropic.ppsx"
             slide.write_bytes(b"slides")
@@ -145,7 +156,7 @@ class SourceSyncTests(unittest.TestCase):
             with patch.object(engine, "list_remote_sources", return_value=[]):
                 report = audit_source_sync(self._request(root, manifest))
 
-            self.assertEqual(report.status, "planned")
+            self.assertEqual(report.status, "planned", _why(report))
             self.assertEqual(report.sources[0].action, "convert")
             self.assertEqual(report.sources[0].upload_extension, ".pdf")
             self.assertFalse((root / ".transcriber-cache").exists())
@@ -153,7 +164,7 @@ class SourceSyncTests(unittest.TestCase):
 
     def test_question_classification_reaches_engine_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Questions").mkdir()
             exam = root / "Questions" / "Final.pdf"
             exam.write_bytes(b"exam")
@@ -180,13 +191,13 @@ class SourceSyncTests(unittest.TestCase):
             with patch.object(engine, "list_remote_sources", return_value=[remote]):
                 report = audit_source_sync(self._request(root, manifest))
 
-            self.assertEqual(report.status, "planned")
+            self.assertEqual(report.status, "planned", _why(report))
             self.assertEqual(report.sources[0].role, "past_exam")
             self.assertEqual(report.sources[0].status, "unchanged")
 
     def test_apply_uploads_ready_source_and_writes_atomic_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Lecture").mkdir()
             (root / "Lecture" / "lecture.mp3").write_bytes(b"audio")
             manifest = self._manifest(
@@ -214,13 +225,13 @@ class SourceSyncTests(unittest.TestCase):
 
             state_path = root / ".transcriber-cache" / "source-sync" / "state.json"
             state = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(report.status, "completed")
+            self.assertEqual(report.status, "completed", _why(report))
             self.assertEqual(report.uploaded_count, 1)
             self.assertEqual(state["sources"][0]["notebooks"][0]["remote_source_id"], "remote-id")
 
     def test_complete_manifest_is_required_for_module_sync(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Lecture").mkdir()
             (root / "Lecture" / "first.mp3").write_bytes(b"first")
             (root / "Lecture" / "second.mp3").write_bytes(b"second")
@@ -237,7 +248,7 @@ class SourceSyncTests(unittest.TestCase):
 
     def test_agent_can_accept_one_changed_remote_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Lecture").mkdir()
             (root / "Lecture" / "lecture.mp3").write_bytes(b"local")
             manifest = self._manifest(
@@ -263,12 +274,12 @@ class SourceSyncTests(unittest.TestCase):
             with patch.object(engine, "list_remote_sources", return_value=[remote]):
                 report = audit_source_sync(self._request(root, manifest))
 
-            self.assertEqual(report.sources[0].status, "accepted-remote")
+            self.assertEqual(report.sources[0].status, "accepted-remote", _why(report))
             self.assertEqual(report.sources[0].notebooks[0].remote_source_id, "remote-id")
 
     def test_preflight_detects_new_and_changed_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             (root / "Lecture").mkdir()
             source = root / "Lecture" / "lecture.mp3"
             source.write_bytes(b"first")
@@ -294,7 +305,7 @@ class SourceSyncTests(unittest.TestCase):
 
     def test_manifest_rejects_source_outside_module_directories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+            root = Path(temporary_directory).resolve()
             manifest = self._manifest(root, [{"path": "../secret.pdf"}])
 
             with self.assertRaises(SourceSyncError):

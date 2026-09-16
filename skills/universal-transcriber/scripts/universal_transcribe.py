@@ -249,6 +249,14 @@ def _unique_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
+# Configure the console at import, not just in main(). Every print() in this
+# module can carry Arabic or an emoji filename, and callers that import it as a
+# library -- the test suite, an embedding agent -- never reach main() to have
+# the streams fixed for them. On a cp1252 Windows console those calls raise
+# UnicodeEncodeError; on POSIX this is a no-op.
+configure_console_streams()
+
+
 # Re-exported so the engine's public surface keeps both names.
 _configure_console_streams = configure_console_streams
 # The original name, kept because tests/test_engine_contract.py pins it.

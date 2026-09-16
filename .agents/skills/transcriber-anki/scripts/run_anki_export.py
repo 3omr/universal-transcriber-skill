@@ -26,6 +26,13 @@ from deck_exporter import DeckExporter
 from transcript_concept_extractor import TranscriptConceptExtractor
 from version_checker import __version__, print_update_notice_if_available
 
+# Configure the console at import, not just in main(). Every print() in this
+# module can carry Arabic or an emoji filename, and callers that import it as a
+# library -- the test suite, an embedding agent -- never reach main() to have
+# the streams fixed for them. On a cp1252 Windows console those calls raise
+# UnicodeEncodeError; on POSIX this is a no-op.
+configure_console_streams()
+
 
 def print_blueprint_table(lecture_title: str, cards: list[dict[str, Any]]) -> None:
     """Prints a beautiful formatted ASCII review table for user inspection."""

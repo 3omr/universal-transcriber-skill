@@ -34,6 +34,13 @@ from version_checker import (
     print_update_notice_if_available,
 )
 
+# Configure the console at import, not just in main(). Every print() in this
+# module can carry Arabic or an emoji filename, and callers that import it as a
+# library -- the test suite, an embedding agent -- never reach main() to have
+# the streams fixed for them. On a cp1252 Windows console those calls raise
+# UnicodeEncodeError; on POSIX this is a no-op.
+configure_console_streams()
+
 # Wall-clock ceilings for the engine subprocess. The engine checkpoints every
 # phase, so a run stopped at the ceiling resumes with --resume-latest rather than
 # starting over. Generous by design: five NotebookLM phases plus OCR and slide

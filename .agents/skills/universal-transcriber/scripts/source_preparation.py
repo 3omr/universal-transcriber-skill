@@ -168,7 +168,22 @@ class PreparationReport:
 
     @property
     def by_relative_path(self) -> dict[str, PreparedSource]:
-        return {entry.relative_path.casefold(): entry for entry in self.entries}
+        """Prepared sources keyed the way every caller looks them up.
+
+        The key has to survive a Windows relative path: callers reach this
+        through normalize_relative_source_path or source_sync._normalize_
+        relative, both of which fold "\\" to "/" before looking up. Keying on a
+        bare casefold made the match depend on the manifest and the platform
+        agreeing on a separator.
+        """
+        return {
+            normalize_prepared_key(entry.relative_path): entry for entry in self.entries
+        }
+
+
+def normalize_prepared_key(relative_path: str) -> str:
+    """Fold a relative source path to the single key shape the engine uses."""
+    return relative_path.replace("\\", "/").strip(" ./").casefold()
 
 
 @dataclass(frozen=True)
