@@ -61,6 +61,25 @@ defaults rather than ignoring it quietly.
 | `emoji_by_subject` | Emoji appended to each transcript filename |
 | `question_coverage_blocks` | `true` makes a below-floor question yield fail the run instead of warning |
 
+### Releases
+
+The version is not bumped by hand. Merging a pull request cuts the release,
+and the PR **title** decides which one:
+
+| title prefix | result | example |
+| --- | --- | --- |
+| `feat:` | minor | 1.4.0 → 1.5.0 |
+| `fix:` `perf:` `refactor:` `revert:` | patch | 1.4.0 → 1.4.1 |
+| `feat!:` or a `BREAKING CHANGE:` footer | major | 1.4.0 → 2.0.0 |
+| `chore:` `docs:` `ci:` `test:` `build:` `style:` | no release | 1.4.0 stays |
+
+A `release:major` / `release:minor` / `release:patch` / `release:skip` label
+overrides the title. A bot comments the planned version on every PR, so the
+answer is visible before anyone clicks merge.
+
+The in-app update notifier polls the latest **GitHub release tag**, which is
+why a merge that cuts no release reaches nobody who installed the skill.
+
 ### Checking a module's transcripts
 
 ```bash

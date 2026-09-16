@@ -1,0 +1,127 @@
+name: Release
+
+# The version should never depend on someone remembering to bump it.
+#
+# On every pull request, `plan` works out what the merge will release and says
+# so in a comment, so the answer is visible before anyone clicks merge. On
+# merge, `release` performs exactly that: bumps VERSION, tags, and publishes a
+# GitHub release, which is what the in-app update notifier reads.
+#
+# Override the decision with a `release:major` / `release:minor` /
+# `release:patch` / `release:skip` label. Otherwise it comes from the
+# conventional-commit type in the PR title. See scripts/next_version.py.
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, labeled, unlabeled, synchronize, closed]
+
+concurrency:
+  group: release-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the next version
+        id: plan
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: bash scripts/ci/plan-version.sh >> "$GITHUB_OUTPUT"
+
+      # A pull request from a fork gets a read-only token, so the comment
+      # cannot be posted. The job summary below still carries the plan, and a
+      # missing comment must not fail the check.
+      - name: Say so on the pull request
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          PLAN_BUMP: ${{ steps.plan.outputs.bump }}
+          PLAN_VERSION: ${{ steps.plan.outputs.version }}
+          PLAN_REASON: ${{ steps.plan.outputs.reason }}
+          PLAN_CURRENT: ${{ steps.plan.outputs.current }}
+          PLAN_RELEASES: ${{ steps.plan.outputs.releases }}
+        with:
+          script: |
+            const marker = '<!-- release-plan -->';
+            const { PLAN_BUMP, PLAN_VERSION, PLAN_REASON, PLAN_CURRENT, PLAN_RELEASES } = process.env;
+            const headline = PLAN_RELEASES === 'true'
+              ? `Merging this will release **v${PLAN_VERSION}** (\`${PLAN_BUMP}\`, from v${PLAN_CURRENT}).`
+              : `Merging this will **not** cut a release. The version stays at **v${PLAN_CURRENT}**.`;
+            const body = [
+              marker,
+              '### Release plan',
+              '',
+              headline,
+              '',
+              `Why: ${PLAN_REASON}.`,
+              '',
+              'To change it, add a `release:major`, `release:minor`, `release:patch`,',
+              'or `release:skip` label — a label always beats the title.',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number,
+            });
+            const existing = comments.find((comment) => comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Record the plan in the job summary
+        run: |
+          {
+            echo "### Release plan"
+            echo
+            echo "| current | bump | next |"
+            echo "| --- | --- | --- |"
+            echo "| ${{ steps.plan.outputs.current }} | ${{ steps.plan.outputs.bump }} | ${{ steps.plan.outputs.version }} |"
+            echo
+            echo "${{ steps.plan.outputs.reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Work out the next version
+        id: plan
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: bash scripts/ci/plan-version.sh >> "$GITHUB_OUTPUT"
+
+      - name: Bump, tag and publish
+        if: steps.plan.outputs.releases == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          NEXT_VERSION: ${{ steps.plan.outputs.version }}
+          BUMP_REASON: ${{ steps.plan.outputs.reason }}
+        run: bash scripts/ci/publish-release.sh
+
+      - name: Say why nothing was released
+        if: steps.plan.outputs.releases != 'true'
+        run: |
+          echo "No release: ${{ steps.plan.outputs.reason }}." >> "$GITHUB_STEP_SUMMARY"
