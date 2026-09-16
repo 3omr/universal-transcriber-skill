@@ -8,7 +8,7 @@ Anki card HTML/CSS following the Egyptian Written Model Answer standard.
 
 import html
 import re
-from typing import Dict, Any, List
+from typing import Any
 
 # CSS styles embedded directly into Anki card templates
 ANKI_CARD_CSS = """
@@ -175,7 +175,7 @@ ANKI_CARD_CSS = """
 """
 
 
-def format_card_front_html(card_item: Dict[str, Any]) -> str:
+def format_card_front_html(card_item: dict[str, Any]) -> str:
     """Generates pure English Front Card HTML."""
     category = card_item.get("category", "past_exams")
     category_label = card_item.get("category_label", "High-Yield Medical")
@@ -184,12 +184,14 @@ def format_card_front_html(card_item: Dict[str, Any]) -> str:
     lecture = card_item.get("lecture", "")
 
     front_raw = card_item.get("front", "")
-    
+
     # Check if options are present (MCQ format)
     if "\n\n" in front_raw and any(opt in front_raw for opt in ["a.", "b.", "a)", "b)"]):
         stem_part, opt_part = front_raw.split("\n\n", 1)
         question_html = f'<div class="question-title">{html.escape(stem_part)}</div>'
-        options_formatted = "<br>".join(html.escape(l) for l in opt_part.split("\n") if l.strip())
+        options_formatted = "<br>".join(
+            html.escape(option) for option in opt_part.split("\n") if option.strip()
+        )
         question_html += f'<div class="options-block">{options_formatted}</div>'
     else:
         question_html = f'<div class="question-title">{html.escape(front_raw)}</div>'
@@ -204,7 +206,7 @@ def format_card_front_html(card_item: Dict[str, Any]) -> str:
     return html_out
 
 
-def format_card_back_html(card_item: Dict[str, Any]) -> str:
+def format_card_back_html(card_item: dict[str, Any]) -> str:
     """Generates pure English Back Card HTML with Written Model Answer formatting."""
     category = card_item.get("category", "past_exams")
     badge_class = f"badge-{category.lower()}"
@@ -215,11 +217,11 @@ def format_card_back_html(card_item: Dict[str, Any]) -> str:
     stem_only = front_raw.split("\n\n")[0] if "\n\n" in front_raw else front_raw
 
     bullets = card_item.get("back_bullets", [])
-    
+
     # Split contraindications / warnings into special highlight box if present
     normal_bullets = []
     contra_bullets = []
-    
+
     for b in bullets:
         b_clean = b.strip()
         if any(w in b_clean.lower() for w in ["contraindicat", "do not", "avoid emesis", "no gastric lavage"]):

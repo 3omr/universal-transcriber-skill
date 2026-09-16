@@ -7,6 +7,8 @@
 !AGENTS.md
 !LICENSE
 !requirements.txt
+# Ruff and mypy configuration (tooling only -- not a package definition).
+!pyproject.toml
 !skills.sh.json
 # The single source of truth for the skill version (scripts/bump-version.sh).
 !VERSION

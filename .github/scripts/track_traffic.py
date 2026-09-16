@@ -27,7 +27,7 @@ def load_history(history_file: str) -> dict[str, Any]:
     if not os.path.exists(history_file):
         return empty_history()
     try:
-        with open(history_file, "r", encoding="utf-8") as handle:
+        with open(history_file, encoding="utf-8") as handle:
             loaded = json.load(handle)
     except (OSError, json.JSONDecodeError) as error:
         print(f"Warning: Could not parse existing history file: {error}")

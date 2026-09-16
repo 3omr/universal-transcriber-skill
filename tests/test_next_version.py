@@ -12,7 +12,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "next_version.py"
 SPEC = importlib.util.spec_from_file_location("test_next_version_module", SCRIPT)
@@ -207,6 +206,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["bump"], "minor")
 
 
+@unittest.skipIf(
+    os.name == "nt",
+    # plan-version.sh runs `python3`, which Windows runners do not provide, and
+    # it only ever executes on ubuntu-latest inside the release workflow.
+    # Running it under Git Bash would test an environment nobody ships.
+    "plan-version.sh is a Linux-only CI script",
+)
 class PlanScriptTests(unittest.TestCase):
     """The workflow reads its inputs from the environment, never from argv."""
 

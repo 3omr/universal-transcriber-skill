@@ -5,7 +5,7 @@
 [![skills.sh](https://img.shields.io/badge/skills.sh-catalog-orange.svg)](skills.sh.json)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![GitHub Stars](https://img.shields.io/github/stars/3omr/universal-transcriber-skill?style=flat&color=yellow)](https://github.com/3omr/universal-transcriber-skill/stargazers)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Turn medical lecture recordings, slides, question banks, and past exams into structured, authoritative 5-section study guides blending detailed Egyptian Arabic explanations with English medical terminology.**
 
@@ -38,7 +38,24 @@ Then verify everything at once — this exits non-zero if anything required is m
 python3 skills/universal-transcriber/scripts/run_transcription.py --doctor
 ```
 
-Python 3.10 or newer is required.
+`--doctor` only checks that each tool is on your PATH. Presence is not health:
+`nlm` can be installed and never have been given credentials, and you would
+only find out half an hour into a run. `--doctor-live` actually runs each tool
+— including the same `nlm notebook list` call the engine makes first — and
+fails if one is installed but not working:
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py --doctor-live
+```
+
+Python 3.10 or newer is required. Linux, macOS and Windows are all supported
+and all covered by CI.
+
+> On Windows the console defaults to the ANSI code page, which can encode
+> neither Arabic nor emoji — that is, none of what this tool prints. The
+> entry points pin stdout and stderr to UTF-8 before writing anything, so this
+> is handled for you; it is only worth knowing if you embed the scripts
+> somewhere else.
 
 ### Configuration
 
@@ -277,12 +294,19 @@ bump versions with the maintenance scripts, and CI fails if the two drift:
 ```bash
 bash scripts/sync-agents-mirror.sh     # regenerate .agents/skills from skills/
 bash scripts/check-agents-mirror.sh    # verify they match (runs in CI)
+bash scripts/check-shared-files.sh     # verify duplicated files match (runs in CI)
 bash scripts/bump-version.sh 1.4.0     # set VERSION and both fallback constants
 python3 -m unittest discover -s tests -t tests
+ruff check . && mypy                   # lint and type check (both run in CI)
 ```
+
+A few files are duplicated across skills on purpose — each skill has to stand
+alone when it is linked into `~/.claude/skills/<name>`, so it cannot import a
+helper from a sibling. `check-shared-files.sh` is what stops those copies from
+drifting apart.
 
 ---
 
 ## License
 
-MIT License.
+Released under the [MIT License](LICENSE).

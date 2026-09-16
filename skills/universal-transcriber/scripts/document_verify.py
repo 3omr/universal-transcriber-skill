@@ -36,12 +36,12 @@ def _run_pdf_tools(
     source: LocalSource,
 ) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
     page_metadata = subprocess.run(
-        ["pdfinfo", source.path], capture_output=True, text=True, timeout=60
+        ["pdfinfo", source.path], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60
     )
     extracted_text = subprocess.run(
         ["pdftotext", "-layout", source.path, "-"],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         timeout=180,
     )
     return page_metadata, extracted_text

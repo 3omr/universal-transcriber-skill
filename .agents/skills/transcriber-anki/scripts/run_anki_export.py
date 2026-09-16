@@ -14,19 +14,27 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 # Add script dir to sys.path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from transcript_concept_extractor import TranscriptConceptExtractor
+from console import configure_console_streams
 from deck_exporter import DeckExporter
+from transcript_concept_extractor import TranscriptConceptExtractor
 from version_checker import __version__, print_update_notice_if_available
 
+# Configure the console at import, not just in main(). Every print() in this
+# module can carry Arabic or an emoji filename, and callers that import it as a
+# library -- the test suite, an embedding agent -- never reach main() to have
+# the streams fixed for them. On a cp1252 Windows console those calls raise
+# UnicodeEncodeError; on POSIX this is a no-op.
+configure_console_streams()
 
-def print_blueprint_table(lecture_title: str, cards: List[Dict[str, Any]]) -> None:
+
+def print_blueprint_table(lecture_title: str, cards: list[dict[str, Any]]) -> None:
     """Prints a beautiful formatted ASCII review table for user inspection."""
     clean_title = lecture_title.replace("🧪", "").strip()
     print("\n" + "=" * 90)
@@ -40,7 +48,7 @@ def print_blueprint_table(lecture_title: str, cards: List[Dict[str, Any]]) -> No
         front = c.get("front", "").replace("\n", " ")
         if len(front) > 38:
             front = front[:35] + "..."
-        
+
         bullets = c.get("back_bullets", [])
         back_summary = " | ".join(bullets) if bullets else "N/A"
         if len(back_summary) > 40:
@@ -51,7 +59,7 @@ def print_blueprint_table(lecture_title: str, cards: List[Dict[str, Any]]) -> No
     print("=" * 90 + "\n")
 
 
-def find_transcript_files(workspace_dir: Path, module_id: str, lecture_name: Optional[str] = None) -> List[Path]:
+def find_transcript_files(workspace_dir: Path, module_id: str, lecture_name: str | None = None) -> list[Path]:
     """Finds target transcript Markdown files under modules/<module_id>/Transcripts/."""
     transcripts_dir = workspace_dir / "modules" / module_id / "Transcripts"
     if not transcripts_dir.is_dir():
@@ -60,7 +68,7 @@ def find_transcript_files(workspace_dir: Path, module_id: str, lecture_name: Opt
     all_files = sorted(transcripts_dir.glob("*.md"))
     # Filter out index and drafts
     valid_files = [
-        f for f in all_files 
+        f for f in all_files
         if not f.name.startswith("Index") and not f.name.endswith(".draft.md") and not f.name.startswith(".")
     ]
 
@@ -79,7 +87,7 @@ def process_lecture(
     output_dir: Path,
     blueprint_dir: Path,
     mode: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Processes a single transcript file according to mode."""
     extractor = TranscriptConceptExtractor(transcript_file, module_id=module_id)
     cards = extractor.extract_full_blueprint()
@@ -113,6 +121,7 @@ def process_lecture(
 
 
 def main():
+    configure_console_streams()
     parser = argparse.ArgumentParser(description="Generate high-yield English medical Anki flashcards from lecture transcripts.")
     parser.add_argument("--workspace", default=".", help="Path to repository workspace root")
     parser.add_argument("--module", required=True, help="Module ID (e.g. toxo)")
@@ -130,7 +139,7 @@ def main():
     workspace_root = Path(args.workspace).resolve()
     print_update_notice_if_available(workspace=workspace_root, quiet=args.no_update_check)
     module_id = args.module
-    
+
     # Destination directories
     default_out = workspace_root / "modules" / module_id / "Anki"
     output_dir = Path(args.output_dir).resolve() if args.output_dir else default_out
@@ -145,10 +154,10 @@ def main():
         if not bp_path.exists():
             print(f"❌ Blueprint file not found: {bp_path}")
             sys.exit(1)
-        
-        with open(bp_path, "r", encoding="utf-8") as f:
+
+        with open(bp_path, encoding="utf-8") as f:
             cards = json.load(f)
-        
+
         lecture_title = bp_path.stem.replace(".blueprint", "")
         exporter = DeckExporter(module_id=module_id, lecture_title=lecture_title, output_dir=output_dir)
         apkg_file = exporter.export_apkg(cards)
@@ -163,7 +172,7 @@ def main():
     target_files = find_transcript_files(workspace_root, module_id, args.lecture)
 
     print(f"\n🔍 Found {len(target_files)} lecture transcript(s) in module '{module_id}'.")
-    
+
     results = []
     for tf in target_files:
         res = process_lecture(

@@ -10,16 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
 import tempfile
 import textwrap
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from file_lock import exclusive_file_lock
 
@@ -168,7 +168,22 @@ class PreparationReport:
 
     @property
     def by_relative_path(self) -> dict[str, PreparedSource]:
-        return {entry.relative_path.casefold(): entry for entry in self.entries}
+        """Prepared sources keyed the way every caller looks them up.
+
+        The key has to survive a Windows relative path: callers reach this
+        through normalize_relative_source_path or source_sync._normalize_
+        relative, both of which fold "\\" to "/" before looking up. Keying on a
+        bare casefold made the match depend on the manifest and the platform
+        agreeing on a separator.
+        """
+        return {
+            normalize_prepared_key(entry.relative_path): entry for entry in self.entries
+        }
+
+
+def normalize_prepared_key(relative_path: str) -> str:
+    """Fold a relative source path to the single key shape the engine uses."""
+    return relative_path.replace("\\", "/").strip(" ./").casefold()
 
 
 @dataclass(frozen=True)
@@ -419,7 +434,7 @@ def _sha256(path: Path) -> str:
 def _run_tool(command: list[str], timeout: int, description: str) -> None:
     try:
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=timeout, check=False
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False
         )
     except FileNotFoundError as error:
         raise PreparationError(f"Required tool for {description} was not found") from error
@@ -435,12 +450,12 @@ def _pdf_text(path: Path) -> tuple[str, str]:
         raise PreparationError("pdfinfo and pdftotext are required for PDF inspection")
     try:
         metadata = subprocess.run(
-            ["pdfinfo", str(path)], capture_output=True, text=True, timeout=60, check=False
+            ["pdfinfo", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False
         )
         extracted = subprocess.run(
             ["pdftotext", "-layout", str(path), "-"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=180,
             check=False,
         )

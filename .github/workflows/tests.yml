@@ -8,11 +8,20 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ['3.10', '3.11', '3.12']
+        include:
+          # Windows is a supported platform, not an aspiration. file_lock.py
+          # carries an msvcrt branch, and the engine's entire output is Arabic
+          # and emoji -- neither of which survives the cp1252 console Windows
+          # hands a Python process by default. This job is what keeps both
+          # honest.
+          - os: windows-latest
+            python-version: '3.12'
     steps:
       - uses: actions/checkout@v4
 
@@ -23,16 +32,26 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
       - name: Install document tooling
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+        if: runner.os == 'Linux'
+        # Azure's apt mirrors drop index files often enough to redden an
+        # otherwise green run, so retry rather than fail the build on someone
+        # else's outage.
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y poppler-utils && exit 0
+            echo "apt attempt $attempt failed; retrying in 15s"
+            sleep 15
+          done
+          exit 1
 
       - name: Run unit tests
         env:
           UNIVERSAL_TRANSCRIBER_NO_UPDATE_CHECK: '1'
-        run: python3 -m unittest discover -s tests -t tests -v
+        run: python -m unittest discover -s tests -t tests -v
 
   mirror-in-sync:
     runs-on: ubuntu-latest
@@ -41,3 +60,28 @@ jobs:
 
       - name: Verify .agents/skills mirrors skills/
         run: bash scripts/check-agents-mirror.sh
+
+      - name: Verify deliberately duplicated files have not drifted
+        run: bash scripts/check-shared-files.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install linters
+        run: python3 -m pip install --upgrade pip ruff==0.16.8 mypy==2.3.1
+
+      - name: Lint
+        run: ruff check .
+
+      # `ruff format` is deliberately not enforced. Adopting it would rewrite
+      # 32 files at once, which would bury every real change under formatting
+      # noise. Worth doing -- but as its own commit, on its own.
+
+      - name: Type check
+        run: mypy

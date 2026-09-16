@@ -11,14 +11,19 @@ The helpers below keep POSIX behavior identical (``fcntl.flock``) and fall back
 to ``msvcrt.locking`` elsewhere. Both raise ``AlreadyLocked`` -- a subclass of
 ``BlockingIOError``, so existing ``except BlockingIOError`` handlers still
 catch it -- when ``blocking=False`` and another process holds the lock.
+
+Being importable on Windows was never enough on its own. The engine writes
+Arabic and emoji to stdout, which a cp1252 console cannot encode, so console.py
+pins both streams to UTF-8 before anything is printed. Locking and encoding
+together are what make the Windows job in CI pass; either one alone does not.
 """
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Iterator
+from typing import IO
 
 try:  # POSIX
     import fcntl
@@ -59,10 +64,10 @@ def lock_file(handle: IO[str], *, blocking: bool = True) -> None:
         # msvcrt locks a byte range rather than the whole file, so every caller
         # must agree on the range; byte 0 of the lock file is the convention
         # here. LK_LOCK retries for ~10s before raising, LK_NBLCK fails at once.
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK  # type: ignore[attr-defined]
         handle.seek(0)
         try:
-            msvcrt.locking(handle.fileno(), mode, 1)
+            msvcrt.locking(handle.fileno(), mode, 1)  # type: ignore[attr-defined]
         except OSError as error:
             raise AlreadyLocked(str(error)) from error
         return

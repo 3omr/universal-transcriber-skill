@@ -25,7 +25,6 @@ from transcript_concept_extractor import (
     generate_blueprint_for_transcript,
 )
 
-
 TRANSCRIPT = """# 🧪 Organophosphates (Toxicology)
 
 ## 📖 Chronological Guide

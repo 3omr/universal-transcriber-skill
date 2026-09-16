@@ -5,20 +5,19 @@ test_anki_generator.py
 Unit tests for the transcriber-anki skill.
 """
 
-import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import sys
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "skills" / "transcriber-anki" / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from transcript_concept_extractor import TranscriptConceptExtractor
-from card_builder import format_card_front_html, format_card_back_html
+from card_builder import format_card_back_html, format_card_front_html
 from deck_exporter import DeckExporter
+from transcript_concept_extractor import TranscriptConceptExtractor
 
 
 class TestAnkiGenerator(unittest.TestCase):
@@ -26,7 +25,7 @@ class TestAnkiGenerator(unittest.TestCase):
     def setUp(self):
         self.test_dir = Path(tempfile.mkdtemp())
         self.sample_transcript = self.test_dir / "Test_Lecture 🧪.md"
-        
+
         sample_md = """# 🧪 Test Lecture (Toxicology)
 
 ## 📖 Chronological Guide
@@ -87,13 +86,13 @@ Arabic explanation.
     def test_concept_extraction(self):
         extractor = TranscriptConceptExtractor(self.sample_transcript, module_id="test_module")
         cards = extractor.extract_full_blueprint()
-        
+
         self.assertGreaterEqual(len(cards), 3)
-        
+
         categories = [c["category"] for c in cards]
         self.assertIn("complications", categories)
         self.assertIn("TTT", categories)
-        
+
         # Verify pure English front and bullets
         for c in cards:
             self.assertTrue(len(c["front"]) > 0)
@@ -115,14 +114,14 @@ Arabic explanation.
             "lecture": "Test Lecture",
             "module": "test_module"
         }
-        
+
         front_html = format_card_front_html(card_sample)
         back_html = format_card_back_html(card_sample)
-        
+
         self.assertIn("Treatment / TTT", front_html)
         self.assertIn("What is the treatment protocol", front_html)
         self.assertIn("badge-ttt", front_html)
-        
+
         self.assertIn("Airway maintenance (ABCD)", back_html)
         self.assertIn("Contraindications", back_html)
         self.assertIn("Emesis", back_html)
@@ -130,16 +129,16 @@ Arabic explanation.
     def test_deck_export(self):
         extractor = TranscriptConceptExtractor(self.sample_transcript, module_id="test_module")
         cards = extractor.extract_full_blueprint()
-        
+
         out_dir = self.test_dir / "Anki"
         exporter = DeckExporter(module_id="test_module", lecture_title="Test Lecture", output_dir=out_dir)
-        
+
         apkg_path = exporter.export_apkg(cards)
         tsv_path = exporter.export_tsv(cards)
-        
+
         self.assertTrue(apkg_path.exists())
         self.assertGreater(apkg_path.stat().st_size, 1000)
-        
+
         self.assertTrue(tsv_path.exists())
         self.assertGreater(tsv_path.stat().st_size, 100)
 

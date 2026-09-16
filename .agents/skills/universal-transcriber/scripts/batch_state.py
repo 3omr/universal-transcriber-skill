@@ -11,11 +11,12 @@ import secrets
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from file_lock import exclusive_file_lock
 

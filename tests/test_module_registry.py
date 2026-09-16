@@ -4,10 +4,9 @@ import json
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
-
+from unittest.mock import patch
 
 # skills/ is the source tree; .agents/skills is a generated mirror of it.
 SCRIPTS_DIR = (
@@ -18,6 +17,7 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import manage_modules as manager
 from module_registry import (
     ModuleConfigError,
     configured_slide,
@@ -25,8 +25,6 @@ from module_registry import (
     load_module,
     resolve_module,
 )
-import manage_modules as manager
-
 
 LAUNCHER_PATH = SCRIPTS_DIR / "run_transcription.py"
 LAUNCHER_SPEC = importlib.util.spec_from_file_location(
@@ -44,7 +42,7 @@ class ModuleRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             module = SimpleNamespace(
                 module_id="toxo",
-                paths=SimpleNamespace(root=Path(temporary_directory)),
+                paths=SimpleNamespace(root=Path(temporary_directory).resolve()),
             )
             first = SimpleNamespace(title="Corrosives.m4a")
             second = SimpleNamespace(title="Volatile.m4a")
@@ -57,7 +55,7 @@ class ModuleRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             module = SimpleNamespace(
                 module_id="toxo",
-                paths=SimpleNamespace(root=Path(temporary_directory)),
+                paths=SimpleNamespace(root=Path(temporary_directory).resolve()),
             )
             recording = SimpleNamespace(title="Corrosives.m4a")
 
@@ -100,7 +98,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_alias_selects_only_its_module_and_resolves_configured_slide(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            workspace = Path(temporary_directory)
+            workspace = Path(temporary_directory).resolve()
             modules = workspace / "modules"
             for module_id, display_name, alias in (
                 ("toxo", "Toxicology", "سموم"),
@@ -135,7 +133,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_source_manifest_preserves_agent_exam_style_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path = Path(temporary_directory).resolve() / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {
@@ -156,7 +154,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_source_manifest_without_exam_style_profile_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path = Path(temporary_directory).resolve() / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {"title": "Corrosives", "recording_sources": ["corrosives.m4a"]}
@@ -169,7 +167,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_source_manifest_accepts_object_sources_and_reference_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path = Path(temporary_directory).resolve() / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {
@@ -200,7 +198,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_source_manifest_accepts_multiple_assessment_years(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path = Path(temporary_directory).resolve() / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {
@@ -227,7 +225,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_source_manifest_rejects_conflicting_year_and_years(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path = Path(temporary_directory).resolve() / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {
@@ -308,7 +306,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_source_manifest_rejects_repeated_approved_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path = Path(temporary_directory).resolve() / "manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {
@@ -326,7 +324,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_manifest_slides_skip_automatic_inventory_scan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            module_root = Path(temporary_directory)
+            module_root = Path(temporary_directory).resolve()
             (module_root / "Lecture").mkdir()
             (module_root / "Questions").mkdir()
             slide_path = module_root / "Lecture" / "animal poisoning.pptx"
@@ -378,7 +376,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_module_config_accepts_multiple_notebook_projects(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            module_root = Path(temporary_directory) / "modules" / "ent"
+            module_root = Path(temporary_directory).resolve() / "modules" / "ent"
             (module_root / "Lecture").mkdir(parents=True)
             (module_root / "Questions").mkdir()
             (module_root / "Transcripts").mkdir()
@@ -476,7 +474,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_module_creation_writes_canonical_directories_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            workspace = Path(temporary_directory)
+            workspace = Path(temporary_directory).resolve()
             request = manager.CreateRequest(
                 workspace=workspace,
                 modules_root=None,
@@ -505,13 +503,13 @@ class ModuleRegistryTests(unittest.TestCase):
             self.assertTrue((module_root / "Questions").is_dir())
             self.assertTrue((module_root / "Transcripts").is_dir())
             self.assertFalse((module_root / "Exams").exists())
-            manifest = json.loads((module_root / "module.json").read_text())
+            manifest = json.loads((module_root / "module.json").read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["notebooks"], [{"id": "new-id", "title": "Cardiology"}])
 
     def test_legacy_exam_merge_stops_before_overwriting_questions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            module_root = Path(temporary_directory) / "modules" / "toxo"
+            module_root = Path(temporary_directory).resolve() / "modules" / "toxo"
             (module_root / "Lecture").mkdir(parents=True)
             (module_root / "Exams").mkdir()
             (module_root / "Questions").mkdir()
@@ -542,7 +540,7 @@ class ModuleRegistryTests(unittest.TestCase):
 
     def test_module_discovery_rejects_missing_runtime_directories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            module_root = Path(temporary_directory) / "modules" / "ent"
+            module_root = Path(temporary_directory).resolve() / "modules" / "ent"
             (module_root / "Lecture").mkdir(parents=True)
             (module_root / "Questions").mkdir()
             (module_root / "module.json").write_text(
@@ -558,11 +556,11 @@ class ModuleRegistryTests(unittest.TestCase):
             )
 
             with self.assertRaises(ModuleConfigError):
-                discover_modules(Path(temporary_directory))
+                discover_modules(Path(temporary_directory).resolve())
 
     def test_generate_auto_manifest_matches_slides_and_questions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            module_root = Path(temporary_directory) / "modules" / "toxo"
+            module_root = Path(temporary_directory).resolve() / "modules" / "toxo"
             lecture_dir = module_root / "Lecture"
             questions_dir = module_root / "Questions"
             lecture_dir.mkdir(parents=True)

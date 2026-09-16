@@ -16,15 +16,14 @@ import tempfile
 import threading
 import time
 import unicodedata
-import urllib.parse
-import zipfile
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import replace
 from datetime import date
-from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
-from xml.etree import ElementTree
+from typing import Any
 
+from console import configure_console_streams
 from exam_years import (  # noqa: F401
     ARABIC_DIGITS,
     MIN_REASONABLE_EXAM_YEAR,
@@ -48,6 +47,7 @@ from output_assembly import (  # noqa: F401
     format_markdown_tables,
     render_index_content,
 )
+from question_coverage import build_report as build_question_coverage_report
 from question_prompts import (  # noqa: F401
     IMP_HEADINGS,
     MAX_ASSESSMENT_CONTEXT_CHARS,
@@ -70,7 +70,6 @@ from question_prompts import (  # noqa: F401
     emphasis_point_count,
     render_exam_style_profile,
 )
-from question_coverage import build_report as build_question_coverage_report
 from source_preparation import (
     PreparationReport,
     PreparedSource,
@@ -78,7 +77,6 @@ from source_preparation import (
     prepare_manifest_sources,
     render_preparation_report,
 )
-
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
@@ -210,6 +208,7 @@ NOTEBOOK_CITATION_PATTERN = re.compile(
 # re-exported here so every existing `universal_transcribe.<Name>` import
 # keeps working while the engine is split up.
 from transcriber_models import (  # noqa: F401
+    MAX_ATTEMPTS,
     CaseEvidence,
     CheckpointError,
     GeneratedSections,
@@ -243,7 +242,6 @@ from transcriber_models import (  # noqa: F401
     TranscriptSaveRequest,
     UploadOutcome,
     ValidationError,
-    MAX_ATTEMPTS,
 )
 
 
@@ -251,11 +249,18 @@ def _unique_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
-def _configure_line_buffering() -> None:
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure:
-            reconfigure(line_buffering=True)
+# Configure the console at import, not just in main(). Every print() in this
+# module can carry Arabic or an emoji filename, and callers that import it as a
+# library -- the test suite, an embedding agent -- never reach main() to have
+# the streams fixed for them. On a cp1252 Windows console those calls raise
+# UnicodeEncodeError; on POSIX this is a no-op.
+configure_console_streams()
+
+
+# Re-exported so the engine's public surface keeps both names.
+_configure_console_streams = configure_console_streams
+# The original name, kept because tests/test_engine_contract.py pins it.
+_configure_line_buffering = _configure_console_streams
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -280,7 +285,7 @@ def load_config() -> dict[str, Any]:
     if not os.path.exists(CONFIG_PATH):
         return dict(DEFAULT_CONFIG)
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+        with open(CONFIG_PATH, encoding="utf-8") as config_file:
             loaded_config = json.load(config_file)
     except json.JSONDecodeError as error:
         print(
@@ -427,7 +432,7 @@ def _run_nlm_json(
         completed = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout_seconds,
             check=False,
         )
@@ -952,8 +957,6 @@ from document_verify import (  # noqa: F401
 )
 
 
-
-
 def build_exam_year_map(local_sources: list[LocalSource]) -> dict[int, list[str]]:
     year_map: dict[int, list[str]] = {}
     for source in local_sources:
@@ -1039,9 +1042,10 @@ def _extension_compatible(local_extension: str, remote_title: str) -> bool:
     slide_documents = {*SLIDE_EXTENSIONS, ".pdf"}
     if local_extension in slide_documents and remote_extension in slide_documents:
         return bool({local_extension, remote_extension} & SLIDE_EXTENSIONS)
-    if local_extension in RECORDING_EXTENSIONS and remote_extension in RECORDING_EXTENSIONS:
-        return True
-    return False
+    return (
+        local_extension in RECORDING_EXTENSIONS
+        and remote_extension in RECORDING_EXTENSIONS
+    )
 
 
 def _source_exists_remotely(source: LocalSource, remote: list[RemoteSource]) -> bool:
@@ -2906,7 +2910,9 @@ def _compact_assessment_query_text(query_text: str) -> str:
     )
 
 
-def _is_generic_query_argument_error(error: NlmError) -> bool:
+def _is_generic_query_argument_error(error: NlmError | TimeoutError) -> bool:
+    if not isinstance(error, NlmError):
+        return False
     message = str(error).casefold()
     return "query request is invalid" in message and not error.source_quarantine
 
@@ -3029,7 +3035,7 @@ def _remote_local_names(report: Phase0Report, roles: set[str]) -> list[str]:
         and _catalog_entry_is_available(entry)
         and entry.get("canonical_name")
     ]
-    return sorted(set((*local_names, *remote_only_names)))
+    return sorted({*local_names, *remote_only_names})
 
 
 def _remote_sources_for_title(
@@ -4121,7 +4127,6 @@ def _merged_badges(
     year_map: dict[int, list[str]],
     evidence_catalog: list[dict[str, Any]] | None,
 ) -> list[str]:
-    source_fields = [source for block in blocks for source in _source_fields(block)]
     years: set[int] = set()
     roles: set[str] = set()
     for block in blocks:
@@ -5868,7 +5873,7 @@ def _new_checkpoint(run_id: str, request: RunRequest, context: PipelineContext) 
         "prompt_version": PROMPT_VERSION,
         "validator_version": VALIDATOR_VERSION,
         "phase_fingerprints": phase_fingerprints,
-        "phases": {phase: "pending" for phase in PHASE_ORDER},
+        "phases": dict.fromkeys(PHASE_ORDER, "pending"),
         "phase_files": {},
         "phase_errors": {},
         "source_quarantine": {},
@@ -5923,9 +5928,9 @@ def _run_directory_for_request(
         return run_dir, checkpoint
     if request.resume_latest:
         accepted_statuses = {"completed", "running"} if request.retry_phase else None
-        candidate = _latest_run(request, root, accepted_statuses)
-        if candidate:
-            request_with_run = replace(request, resume_run=str(candidate))
+        latest_run = _latest_run(request, root, accepted_statuses)
+        if latest_run:
+            request_with_run = replace(request, resume_run=str(latest_run))
             return _run_directory_for_request(request_with_run, context)
         raise CheckpointError("No incomplete checkpoint exists for this lecture")
     incomplete_run = _latest_run(request, root)

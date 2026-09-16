@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 SCRIPTS_DIR = (
     Path(__file__).parents[1] / "skills" / "universal-transcriber" / "scripts"
 )

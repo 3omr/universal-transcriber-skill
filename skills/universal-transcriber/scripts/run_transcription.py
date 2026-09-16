@@ -13,12 +13,14 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Iterator
+from typing import Any
 
+from console import configure_console_streams
 from file_lock import exclusive_file_lock
 from module_registry import (
     ModuleConfig,
@@ -32,6 +34,12 @@ from version_checker import (
     print_update_notice_if_available,
 )
 
+# Configure the console at import, not just in main(). Every print() in this
+# module can carry Arabic or an emoji filename, and callers that import it as a
+# library -- the test suite, an embedding agent -- never reach main() to have
+# the streams fixed for them. On a cp1252 Windows console those calls raise
+# UnicodeEncodeError; on POSIX this is a no-op.
+configure_console_streams()
 
 # Wall-clock ceilings for the engine subprocess. The engine checkpoints every
 # phase, so a run stopped at the ceiling resumes with --resume-latest rather than
@@ -576,8 +584,6 @@ TOPIC_SYNONYMS: dict[str, str] = {
     "lead": "معادن",
     "arsenic": "معادن",
     "mercury": "معادن",
-    "aspirin": "acetyl salysilic",
-    "salicylate": "acetyl salysilic",
     "paracetamol": "paracetamol",
     "panadol": "paracetamol",
     "acetaminophen": "paracetamol",
@@ -751,7 +757,7 @@ def generate_auto_manifest(
     module_json_path = module_root / "module.json"
     if (not assessment_sources or not audio_files or not slide_files) and module_json_path.is_file():
         try:  # noqa: PLR1702 - remote discovery is one cohesive best-effort block
-            with open(module_json_path, "r", encoding="utf-8") as f:
+            with open(module_json_path, encoding="utf-8") as f:
                 mod_meta = json.load(f)
             notebooks = mod_meta.get("notebooks") or []
             if not notebooks and "notebook" in mod_meta:
@@ -763,7 +769,7 @@ def generate_auto_manifest(
                 nlm_cmd = [nlm_executable, "source", "list", nb_id, "--json"]
                 if nb_profile:
                     nlm_cmd.extend(["--profile", str(nb_profile)])
-                proc = subprocess.run(nlm_cmd, capture_output=True, text=True, timeout=30)
+                proc = subprocess.run(nlm_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
                 if proc.returncode == 0:
                     remote_list = json.loads(proc.stdout)
                     if isinstance(remote_list, dict):
@@ -803,7 +809,7 @@ def generate_auto_manifest(
                                     })
 
                             # Match remote audio files if no local audio matched
-                            if need_remote_audio and (any(r_lower.endswith(ext) for ext in [".mp3", ".m4a", ".wav", ".aac", ".ogg"]) or r_src.get("type") == "audio"):
+                            if need_remote_audio and (any(r_lower.endswith(ext) for ext in [".mp3", ".m4a", ".wav", ".aac", ".ogg"]) or r_src.get("type") == "audio"):  # noqa: SIM102 - already seven levels deep; merging makes the line unreadable
                                 if score_match(r_title) > 0:
                                     if matched_audio == [f"{query_stem}.mp3"]:
                                         matched_audio = [r_title]
@@ -811,7 +817,7 @@ def generate_auto_manifest(
                                         matched_audio.append(r_title)
 
                             # Match remote slides or book if no local slide matched
-                            if need_remote_slides and (is_book or any(r_lower.endswith(ext) for ext in [".pdf", ".pptx", ".ppsx", ".ppt", ".docx"])):
+                            if need_remote_slides and (is_book or any(r_lower.endswith(ext) for ext in [".pdf", ".pptx", ".ppsx", ".ppt", ".docx"])):  # noqa: SIM102 - already seven levels deep; merging makes the line unreadable
                                 if score_match(r_title) > 0 or (is_book and not best_slide):
                                     slide_path = f"Lecture/{r_title}" if not r_title.startswith("Lecture/") else r_title
                                     slides_action = "use_remote"
@@ -1063,7 +1069,7 @@ def _execute_recording(
 ) -> int:
     additional = ()
     title = None
-    approved_uploads = ()
+    approved_uploads: tuple[str, ...] = ()
     slides: Path | None = None
     if manifest:
         selected = tuple(
@@ -1169,6 +1175,16 @@ def _parser() -> argparse.ArgumentParser:
             "installed, then exit"
         ),
     )
+    parser.add_argument(
+        "--doctor-live",
+        action="store_true",
+        help=(
+            "Like --doctor, but actually runs each tool to prove it works -- "
+            "most importantly whether `nlm` is authenticated. Slower, and the "
+            "only version of the check that catches an installed-but-unusable "
+            "tool before a run wastes half an hour on it"
+        ),
+    )
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument(
         "--sync-sources",
@@ -1238,10 +1254,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure:
-            reconfigure(line_buffering=True)
+    configure_console_streams()
     args = _parser().parse_args()
     workspace_for_cache = None
     if getattr(args, "workspace", None):
@@ -1250,10 +1263,10 @@ def main() -> int:
         except Exception:
             pass
     print_update_notice_if_available(workspace=workspace_for_cache, quiet=getattr(args, "no_update_check", False))
-    if args.doctor:
-        from dependency_doctor import report
+    if args.doctor or args.doctor_live:
+        from dependency_doctor import report as dependency_report
 
-        return report()
+        return dependency_report(live=args.doctor_live)
     try:
         if bool(args.recovery_phase) != bool(args.recovery_response):
             raise LauncherError(

@@ -10,11 +10,12 @@ change.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any
 
 from source_preparation import PreparationReport
-
 
 # How many times a phase query is retried before the run gives up. Lives here
 # because PhaseValidationError reports against it.
@@ -35,7 +36,7 @@ class NlmError(TranscriberError):
     def __init__(
         self,
         message: str,
-        source_quarantine: tuple["SourceQuarantine", ...] = (),
+        source_quarantine: tuple[SourceQuarantine, ...] = (),
     ) -> None:
         self.source_quarantine = tuple(source_quarantine)
         super().__init__(message)
@@ -58,7 +59,7 @@ class PhaseValidationError(ValidationError):
         errors: list[str],
         answer: str = "",
         source_names: tuple[str, ...] = (),
-        source_quarantine: tuple["SourceQuarantine", ...] = (),
+        source_quarantine: tuple[SourceQuarantine, ...] = (),
         attempts: int | None = None,
         exhausted: bool = False,
     ) -> None:
@@ -251,7 +252,7 @@ class PhaseQuery:
     source_ids: tuple[str, ...] = ()
     source_names: tuple[str, ...] = ()
     notebook_ids: tuple[str, ...] = ()
-    project_scopes: tuple["ProjectQueryScope", ...] = ()
+    project_scopes: tuple[ProjectQueryScope, ...] = ()
     normalizer: Callable[[QueryResult], QueryResult] | None = None
 
 
@@ -264,7 +265,7 @@ class NlmQueryRequest:
     source_names: tuple[str, ...]
     notebook_ids: tuple[str, ...] = ()
     phase_name: str = ""
-    project_scopes: tuple["ProjectQueryScope", ...] = ()
+    project_scopes: tuple[ProjectQueryScope, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills" / "universal-transcriber" / "scripts"
@@ -92,7 +92,7 @@ class TestVersionChecker(unittest.TestCase):
             cache_dir = workspace / ".transcriber-cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             cache_file = cache_dir / "version_check.json"
-            
+
             # Write a valid cache with newer version
             cache_file.write_text(
                 json.dumps({"latest_version": NEXT_VERSION, "checked_at": time.time()}),
@@ -118,7 +118,7 @@ class TestVersionChecker(unittest.TestCase):
             workspace = Path(tmpdir)
             cache_dir = workspace / ".transcriber-cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
-            
+
             result = version_checker.check_for_updates(workspace=workspace, force=True)
             self.assertEqual(result, NEXT_VERSION)
 
