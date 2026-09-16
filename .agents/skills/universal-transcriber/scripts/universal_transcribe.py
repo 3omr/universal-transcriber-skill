@@ -175,6 +175,7 @@ MEDICAL_OCR_ALLOWLIST = frozenset({
     "quadrant",
     "radiotherapy",
     "succimer",
+    "transparency",
 })
 NOTEBOOK_CITATION_PATTERN = re.compile(
     r"\[\s*\d+(?:\s*[,،、;\-–—]\s*\d+)*\s*\]"

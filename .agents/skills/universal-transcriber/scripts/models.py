@@ -135,6 +135,7 @@ MEDICAL_OCR_ALLOWLIST = frozenset({
     "quadrant",
     "radiotherapy",
     "succimer",
+    "transparency",
 })
 
 
