@@ -25,7 +25,51 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 from xml.etree import ElementTree
 
+from exam_years import (  # noqa: F401
+    ARABIC_DIGITS,
+    MIN_REASONABLE_EXAM_YEAR,
+    extract_exam_years,
+    extract_filename_exam_years,
+    is_reasonable_exam_year,
+)
 from file_lock import exclusive_file_lock
+from output_assembly import (  # noqa: F401
+    _delete_review_draft,
+    _existing_target_contents,
+    _index_row,
+    _index_with_row,
+    _new_index,
+    _prepare_temp,
+    _prepared_targets,
+    _remove_prepared_files,
+    _restore_replaced_files,
+    commit_managed_transcript,
+    commit_transcript_and_index,
+    format_markdown_tables,
+    render_index_content,
+)
+from question_prompts import (  # noqa: F401
+    IMP_HEADINGS,
+    MAX_ASSESSMENT_CONTEXT_CHARS,
+    MAX_ASSESSMENT_QUERY_CHARS,
+    MAX_ASSESSMENT_STYLE_CHARS,
+    MAX_EMPHASIS_CONTEXT_CHARS,
+    NO_MCQS,
+    NO_WRITTEN,
+    _compact_assessment_context,
+    _emphasis_context,
+    _emphasis_minimum,
+    _truncate_query_fragment,
+    build_case_prompt,
+    build_guide_prompt,
+    build_imp_mcq_prompt,
+    build_imp_prompt,
+    build_imp_written_prompt,
+    build_mcq_prompt,
+    build_written_prompt,
+    emphasis_point_count,
+    render_exam_style_profile,
+)
 from question_coverage import build_report as build_question_coverage_report
 from source_preparation import (
     PreparationReport,
@@ -50,10 +94,6 @@ MAX_SOURCE_IDS_PER_QUERY = 3
 # exam-to-bank link), which made an otherwise valid source request look like an
 # invalid source-ID request.  Keep the source list and the prompt contract
 # compact enough for the provider and leave room for a bounded repair suffix.
-MAX_ASSESSMENT_CONTEXT_CHARS = 900
-MAX_ASSESSMENT_QUERY_CHARS = 4000
-MAX_ASSESSMENT_STYLE_CHARS = 750
-MAX_ATTEMPTS = 3
 # A dependant phase falls back to running without its input rather than
 # deadlocking if the phase it waits on never settles.
 PHASE_DEPENDENCY_TIMEOUT_SECONDS = 20 * 60
@@ -83,19 +123,12 @@ LARGE_UPLOAD_POLL_ATTEMPTS = 36
 SOURCE_DELETE_POLL_SECONDS = 2
 SOURCE_DELETE_POLL_ATTEMPTS = 15
 MAX_SOURCE_REPLACEMENT_ROUNDS = 1
-MIN_REASONABLE_EXAM_YEAR = 2000
-
-
 @contextmanager
 def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
     with exclusive_file_lock(lock_path):
         yield
 
 
-def is_reasonable_exam_year(year: int) -> bool:
-    return MIN_REASONABLE_EXAM_YEAR <= year <= date.today().year + 1
-
-ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 RECORDING_EXTENSIONS = {
     ".m4a",
     ".mp3",
@@ -120,13 +153,6 @@ NLM_UPLOAD_EXTENSIONS = (
 )
 
 ALLOWED_CALLOUTS = {"NOTE", "IMPORTANT", "WARNING", "CAUTION", "TIP"}
-IMP_HEADINGS = (
-    "#### 1. 📌 Doctor's Spoken Pearls",
-    "#### 2. ⚠️ Diagnostic Traps",
-    "#### 3. 🛑 Lethal Mistakes",
-    "#### 4. ❓ Interactive Doctor Questions",
-    "#### 5. 📋 Exam Rules",
-)
 SECTION_HEADINGS = (
     "## 📖 Chronological Guide",
     "## 🌟 IMP Points",
@@ -134,8 +160,6 @@ SECTION_HEADINGS = (
     "## ✍️ Written Questions",
     "## 🩺 Clinical Cases",
 )
-NO_MCQS = "NO_GROUNDED_MCQS"
-NO_WRITTEN = "NO_GROUNDED_WRITTEN_QUESTIONS"
 QUESTION_OPTION_KEYS = ("a", "b", "c", "d")
 EDITORIAL_REVIEW_MARKERS = (
     "NEEDS_SOURCE_REVIEW",
@@ -182,401 +206,45 @@ NOTEBOOK_CITATION_PATTERN = re.compile(
 )
 
 
-class TranscriberError(RuntimeError):
-    """Base error for failures that must not produce a transcript."""
-
-
-class Phase0Error(TranscriberError):
-    """Raised when the source audit cannot establish safe inputs."""
-
-
-class NlmError(TranscriberError):
-    """Raised when the NotebookLM CLI cannot produce a valid result."""
-
-    def __init__(
-        self,
-        message: str,
-        source_quarantine: tuple["SourceQuarantine", ...] = (),
-    ) -> None:
-        self.source_quarantine = tuple(source_quarantine)
-        super().__init__(message)
-
-
-class ValidationError(TranscriberError):
-    """Raised when generated Markdown violates its phase contract."""
-
-
-class CheckpointError(TranscriberError):
-    """Raised when a saved run cannot be safely resumed."""
-
-
-class PhaseValidationError(ValidationError):
-    """A phase failed with its last response preserved for Agent recovery."""
-
-    def __init__(
-        self,
-        phase_name: str,
-        errors: list[str],
-        answer: str = "",
-        source_names: tuple[str, ...] = (),
-        source_quarantine: tuple["SourceQuarantine", ...] = (),
-        attempts: int | None = None,
-        exhausted: bool = False,
-    ) -> None:
-        self.phase_name = phase_name
-        self.errors = list(errors)
-        self.answer = answer
-        self.source_names = tuple(source_names)
-        self.source_quarantine = tuple(source_quarantine)
-        self.attempts = attempts
-        self.exhausted = exhausted
-        super().__init__(
-            f"{phase_name} {self._attempt_summary()}: " + "; ".join(self.errors)
-        )
-
-    def _attempt_summary(self) -> str:
-        """Say how many NotebookLM queries were actually spent.
-
-        The loop stops at the first usable-but-invalid answer so the Agent can
-        repair it in flight, which is usually attempt 1. Reporting the maximum
-        every time made a single query look like three.
-        """
-        if self.attempts is None:
-            return "failed"
-        if self.exhausted:
-            return f"failed after {self.attempts} attempts"
-        plural = "attempt" if self.attempts == 1 else "attempts"
-        return (
-            f"failed on {self.attempts} {plural} of {MAX_ATTEMPTS} "
-            "(stopped early for Agent repair)"
-        )
-
-
-@dataclass
-class OCRReport:
-    path: str
-    status: str
-    reason: str
-    page_count: int = 0
-    text_pages: int = 0
-    total_characters: int = 0
-    sparse_page_ratio: float = 0.0
-    garbage_ratio: float = 0.0
-
-
-@dataclass(frozen=True)
-class PDFMetrics:
-    page_count: int
-    text_pages: int
-    total_characters: int
-    sparse_page_ratio: float
-    garbage_ratio: float
-
-
-@dataclass
-class LocalSource:
-    path: str
-    relative_path: str
-    name: str
-    normalized_name: str
-    normalized_stem: str
-    extension: str
-    size: int
-    role: str
-    years: tuple[int, ...] = ()
-    ocr: OCRReport | None = None
-    prepared_extension: str = ""
-    original_path: str = ""
-    original_size: int = 0
-    preparation_action: str = "use"
-    preparation_status: str = "ready"
-    source_sha256: str = ""
-    prepared_sha256: str = ""
-    years_verified_by_manifest: bool = False
-
-    @property
-    def upload_extension(self) -> str:
-        return self.prepared_extension or self.extension
-
-    @property
-    def is_preparation_planned(self) -> bool:
-        return self.preparation_status == "planned"
-
-
-@dataclass(frozen=True)
-class RemoteSource:
-    source_id: str
-    title: str
-    normalized_name: str
-    normalized_stem: str
-    source_type: str = ""
-    notebook_uuid: str = ""
-    content_hash: str = ""
-    status: str = ""
-
-
-@dataclass(frozen=True)
-class NotebookTarget:
-    library_id: str
-    notebook_uuid: str
-    url: str
-    name: str
-
-
-@dataclass(frozen=True)
-class SourceQuarantine:
-    notebook_uuid: str
-    source_id: str
-    source_name: str
-    error: str
-
-
-@dataclass(frozen=True)
-class SourceReplacement:
-    notebook_uuid: str
-    old_source_id: str
-    old_source_name: str
-    local_path: str
-    new_source_id: str
-    new_source_name: str
-
-
-@dataclass
-class QueryResult:
-    answer: str
-    source_names: tuple[str, ...] = ()
-    session_id: str | None = None
-    source_quarantine: tuple[SourceQuarantine, ...] = ()
-
-
-@dataclass
-class Phase0Report:
-    notebook: NotebookTarget
-    local_sources: list[LocalSource]
-    remote_sources: list[RemoteSource]
-    notebooks: tuple[NotebookTarget, ...] = ()
-    duplicates: list[LocalSource] = field(default_factory=list)
-    ambiguous: list[LocalSource] = field(default_factory=list)
-    missing_before_upload: list[LocalSource] = field(default_factory=list)
-    unsupported: list[LocalSource] = field(default_factory=list)
-    ignored: list[LocalSource] = field(default_factory=list)
-    uploaded: list[LocalSource] = field(default_factory=list)
-    replacements: list[SourceReplacement] = field(default_factory=list)
-    year_map: dict[int, list[str]] = field(default_factory=dict)
-    question_banks: list[str] = field(default_factory=list)
-    question_bank_links: dict[str, list[str]] = field(default_factory=dict)
-    recording_source: str = ""
-    recording_sources: tuple[str, ...] = ()
-    slide_source: str = ""
-    blocking_errors: list[str] = field(default_factory=list)
-    preparation: PreparationReport | None = None
-    reference_guidance: list[dict[str, Any]] = field(default_factory=list)
-    evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
-    assessment_sources: tuple[dict[str, Any], ...] = ()
-
-
-@dataclass(frozen=True)
-class Phase0Request:
-    config: dict[str, Any]
-    requested_notebook_ids: tuple[str, ...]
-    subject: str
-    sources_root: str
-    lecture_name: str
-    recording_sources: tuple[str, ...]
-    slides_path: str | None
-    approved_uploads: tuple[str, ...] = ()
-    agent_reviewed: bool = False
-    assessment_sources: tuple[dict[str, Any], ...] = ()
-    preparation_manifest: dict[str, Any] | None = None
-    prepare_sources: bool = True
-
-    @property
-    def requested_notebook_id(self) -> str:
-        return self.requested_notebook_ids[0]
-
-
-@dataclass(frozen=True)
-class SourceAuthorityRequest:
-    lecture_name: str
-    recording_sources: tuple[str, ...]
-    slides_path: str | None
-
-
-@dataclass(frozen=True)
-class PhaseQuery:
-    config: dict[str, Any]
-    notebook: NotebookTarget
-    query_text: str
-    phase_name: str
-    validator: Callable[[QueryResult], list[str]]
-    source_ids: tuple[str, ...] = ()
-    source_names: tuple[str, ...] = ()
-    notebook_ids: tuple[str, ...] = ()
-    project_scopes: tuple["ProjectQueryScope", ...] = ()
-    normalizer: Callable[[QueryResult], QueryResult] | None = None
-
-
-@dataclass(frozen=True)
-class NlmQueryRequest:
-    config: dict[str, Any]
-    notebook: NotebookTarget
-    query_text: str
-    source_ids: tuple[str, ...]
-    source_names: tuple[str, ...]
-    notebook_ids: tuple[str, ...] = ()
-    phase_name: str = ""
-    project_scopes: tuple["ProjectQueryScope", ...] = ()
-
-
-@dataclass(frozen=True)
-class ProjectQueryScope:
-    notebook_uuid: str
-    source_ids: tuple[str, ...]
-    source_names: tuple[str, ...]
-    source_names_by_id: tuple[tuple[str, str], ...] = ()
-
-
-@dataclass(frozen=True)
-class QueryScope:
-    source_ids: tuple[str, ...]
-    source_names: tuple[str, ...]
-    project_scopes: tuple[ProjectQueryScope, ...] = ()
-
-
-@dataclass(frozen=True)
-class TranscriptIdentity:
-    subject: str
-    title: str
-    emoji: str
-    recording_source: str
-    source_files: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class GeneratedSections:
-    guide: str
-    imp: str
-    mcqs: str
-    written: str
-    cases: str
-
-
-@dataclass(frozen=True)
-class OutputTarget:
-    transcripts_dir: str
-    file_name: str
-    output_path: str
-
-
-@dataclass(frozen=True)
-class RunRequest:
-    subject: str
-    notebook_ids: tuple[str, ...]
-    lecture_name: str
-    recording_sources: tuple[str, ...]
-    slides_path: str | None
-    sources_root: str
-    title: str
-    emoji: str
-    target: OutputTarget
-    audit_only: bool
-    approved_uploads: tuple[str, ...] = ()
-    agent_reviewed: bool = False
-    exam_style_profile: dict[str, Any] = field(default_factory=dict)
-    assessment_sources: tuple[dict[str, Any], ...] = ()
-    draft_only: bool = False
-    finalize_draft: bool = False
-    source_manifest: dict[str, Any] | None = None
-    resume_run: str | None = None
-    resume_latest: bool = False
-    retry_phase: str | None = None
-    recovery_phase: str | None = None
-    recovery_response: str | None = None
-
-    @property
-    def notebook_id(self) -> str:
-        return self.notebook_ids[0]
-
-
-@dataclass(frozen=True)
-class PipelineContext:
-    config: dict[str, Any]
-    report: Phase0Report
-    identity: TranscriptIdentity
-    source_manifest: str
-    badge_instructions: str
-    verified_years: set[int]
-    evidence_sources: list[str]
-    guide_scope: QueryScope
-    assessment_scope: QueryScope
-    exam_style_profile: dict[str, Any] = field(default_factory=dict)
-    evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
-    assessment_source_scope: QueryScope = field(
-        default_factory=lambda: QueryScope((), ())
-    )
-
-
-@dataclass(frozen=True)
-class CaseEvidence:
-    year_map: dict[int, list[str]]
-    evidence_sources: list[str]
-    recording_sources: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class QuestionEvidence:
-    year_map: dict[int, list[str]]
-    evidence_sources: list[str]
-    exam_style_profile: dict[str, Any] = field(default_factory=dict)
-    evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
-    recording_sources: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class QuestionProvenanceContext:
-    block: str
-    heading_prefix: str
-    number: str
-    evidence: QuestionEvidence
-    badges: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class UploadOutcome:
-    remote_sources: list[RemoteSource]
-    uploaded_by_run: bool
-
-
-@dataclass(frozen=True)
-class PhaseCheckpointUpdate:
-    run_dir: Path
-    checkpoint: dict[str, Any]
-    phase: str
-    status: str
-    answer: str = ""
-    errors: tuple[str, ...] = ()
-    source_quarantine: tuple[SourceQuarantine, ...] = ()
-
-
-@dataclass(frozen=True)
-class RecoveryBundle:
-    run_dir: Path
-    phase: str
-    answer: str
-    errors: tuple[str, ...]
-    checkpoint: dict[str, Any]
-    source_names: tuple[str, ...] = ()
-    source_quarantine: tuple[SourceQuarantine, ...] = ()
-
-
-@dataclass(frozen=True)
-class TranscriptSaveRequest:
-    identity: TranscriptIdentity
-    sections: GeneratedSections
-    target: OutputTarget
-    verified_years: set[int]
-    exam_style_profile: dict[str, Any]
-    evidence_catalog: list[dict[str, Any]]
+# Errors and data records now live in transcriber_models; they are
+# re-exported here so every existing `universal_transcribe.<Name>` import
+# keeps working while the engine is split up.
+from transcriber_models import (  # noqa: F401
+    CaseEvidence,
+    CheckpointError,
+    GeneratedSections,
+    LocalSource,
+    NlmError,
+    NlmQueryRequest,
+    NotebookTarget,
+    OCRReport,
+    OutputTarget,
+    PDFMetrics,
+    Phase0Error,
+    Phase0Report,
+    Phase0Request,
+    PhaseCheckpointUpdate,
+    PhaseQuery,
+    PhaseValidationError,
+    PipelineContext,
+    ProjectQueryScope,
+    QueryResult,
+    QueryScope,
+    QuestionEvidence,
+    QuestionProvenanceContext,
+    RecoveryBundle,
+    RemoteSource,
+    RunRequest,
+    SourceAuthorityRequest,
+    SourceQuarantine,
+    SourceReplacement,
+    TranscriberError,
+    TranscriptIdentity,
+    TranscriptSaveRequest,
+    UploadOutcome,
+    ValidationError,
+    MAX_ATTEMPTS,
+)
 
 
 def _unique_strings(values: list[str]) -> list[str]:
@@ -1002,30 +670,6 @@ def normalize_relative_source_path(source_path: str) -> str:
     return re.sub(r"/+", "/", normalized)
 
 
-def extract_exam_years(source_text: str) -> tuple[int, ...]:
-    normalized = unicodedata.normalize("NFKC", source_text or "").translate(ARABIC_DIGITS)
-    maximum = date.today().year + 1
-    years = {int(year) for year in re.findall(r"(?<!\d)(20\d{2})(?!\d)", normalized)}
-    return tuple(
-        sorted(
-            year
-            for year in years
-            if MIN_REASONABLE_EXAM_YEAR <= year <= maximum
-        )
-    )
-
-
-def extract_filename_exam_years(file_name: str) -> tuple[int, ...]:
-    normalized = unicodedata.normalize("NFKC", file_name or "").translate(ARABIC_DIGITS)
-    years = set(extract_exam_years(normalized))
-    maximum = date.today().year + 1
-    for short_year in re.findall(r"(?<!\d)(2\d)(?!\d)", normalized):
-        expanded = 2000 + int(short_year)
-        if MIN_REASONABLE_EXAM_YEAR <= expanded <= maximum:
-            years.add(expanded)
-    return tuple(sorted(years))
-
-
 def _classify_source(path: str, root_name: str) -> str:
     extension = os.path.splitext(path)[1].lower()
     if root_name == "Exams":
@@ -1291,169 +935,23 @@ def _path_claims_a_year(path: str) -> bool:
     return False
 
 
-def _garbage_ratio(text: str) -> float:
-    if not text:
-        return 1.0
-    garbage = text.count("\ufffd") + sum(
-        1 for character in text if ord(character) < 32 and character not in "\n\r\t\f"
-    )
-    return garbage / max(len(text), 1)
+# Document text verification now lives in document_verify.
+from document_verify import (  # noqa: F401
+    _docx_report,
+    _docx_text,
+    _garbage_ratio,
+    _pdf_metrics,
+    _pdf_pages,
+    _pdf_quality,
+    _pdf_report,
+    _pdf_tool_failure,
+    _run_pdf_tools,
+    _verify_docx,
+    _verify_pdf,
+    verify_document_text,
+)
 
 
-def _pdf_tool_failure(source: LocalSource, reason: str) -> tuple[OCRReport, tuple[int, ...]]:
-    return OCRReport(source.path, "fail", reason[:500]), ()
-
-
-def _run_pdf_tools(
-    source: LocalSource,
-) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
-    page_metadata = subprocess.run(
-        ["pdfinfo", source.path], capture_output=True, text=True, timeout=60
-    )
-    extracted_text = subprocess.run(
-        ["pdftotext", "-layout", source.path, "-"],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    return page_metadata, extracted_text
-
-
-def _pdf_pages(page_metadata: str, extracted_text: str) -> tuple[int, list[str]]:
-    page_match = re.search(r"^Pages:\s+(\d+)", page_metadata, flags=re.MULTILINE)
-    declared_pages = int(page_match.group(1)) if page_match else 0
-    pages = extracted_text.split("\f")
-    if pages and not pages[-1].strip():
-        pages.pop()
-    if declared_pages and len(pages) < declared_pages:
-        pages.extend([""] * (declared_pages - len(pages)))
-    return declared_pages or max(len(pages), 1), pages
-
-
-def _pdf_metrics(page_metadata: str, extracted_text: str) -> PDFMetrics:
-    page_count, pages = _pdf_pages(page_metadata, extracted_text)
-    character_counts = [sum(character.isalnum() for character in page) for page in pages]
-    sparse_pages = sum(count < 20 for count in character_counts)
-    return PDFMetrics(
-        page_count=page_count,
-        text_pages=sum(count >= 20 for count in character_counts),
-        total_characters=sum(character_counts),
-        sparse_page_ratio=sparse_pages / max(page_count, 1),
-        garbage_ratio=_garbage_ratio(extracted_text),
-    )
-
-
-def _pdf_quality(metrics: PDFMetrics, source_role: str) -> tuple[str, str]:
-    if metrics.total_characters < 50:
-        return "fail", "No usable OCR/text layer was extracted"
-    if metrics.garbage_ratio > 0.02:
-        return "fail", "Extracted text contains excessive corrupt characters"
-    if metrics.sparse_page_ratio > 0.80 and source_role in {
-        "past_exam",
-        "question_bank",
-    }:
-        return "fail", "Most exam/question-bank pages have no usable text"
-    characters_per_page = metrics.total_characters / max(metrics.page_count, 1)
-    if metrics.sparse_page_ratio > 0.60 or characters_per_page < 80:
-        return "warning", "Text is sparse; review OCR quality manually"
-    return "pass", "Extractable text is available"
-
-
-def _pdf_report(source: LocalSource, metrics: PDFMetrics) -> OCRReport:
-    status, reason = _pdf_quality(metrics, source.role)
-    return OCRReport(
-        path=source.path,
-        status=status,
-        reason=reason,
-        page_count=metrics.page_count,
-        text_pages=metrics.text_pages,
-        total_characters=metrics.total_characters,
-        sparse_page_ratio=metrics.sparse_page_ratio,
-        garbage_ratio=metrics.garbage_ratio,
-    )
-
-
-def _verify_pdf(source: LocalSource) -> tuple[OCRReport, tuple[int, ...]]:
-    if not shutil.which("pdfinfo") or not shutil.which("pdftotext"):
-        return _pdf_tool_failure(
-            source, "pdfinfo and pdftotext are required for PDF text verification"
-        )
-    try:
-        page_metadata, extracted_text = _run_pdf_tools(source)
-    except subprocess.TimeoutExpired:
-        return _pdf_tool_failure(source, "PDF text extraction timed out")
-    if page_metadata.returncode != 0 or extracted_text.returncode != 0:
-        reason = (
-            extracted_text.stderr.strip()
-            or page_metadata.stderr.strip()
-            or "PDF extraction failed"
-        )
-        return _pdf_tool_failure(source, reason)
-    metrics = _pdf_metrics(page_metadata.stdout, extracted_text.stdout)
-    return _pdf_report(source, metrics), extract_exam_years(extracted_text.stdout)
-
-
-def _docx_text(source: LocalSource) -> str:
-    with zipfile.ZipFile(source.path) as archive:
-        document_xml = archive.read("word/document.xml")
-    root = ElementTree.fromstring(document_xml)
-    return " ".join(node.text or "" for node in root.iter() if node.tag.endswith("}t"))
-
-
-def _docx_report(source: LocalSource, text: str) -> OCRReport:
-    total_characters = sum(character.isalnum() for character in text)
-    garbage_ratio = _garbage_ratio(text)
-    status, reason = "pass", "Extractable document text is available"
-    if total_characters < 50:
-        status, reason = "fail", "DOCX is empty or image-only and needs OCR"
-    elif garbage_ratio > 0.02:
-        status, reason = "fail", "DOCX text contains excessive corrupt characters"
-    elif total_characters < 200:
-        status, reason = "warning", "DOCX contains very little extractable text"
-    return OCRReport(
-        path=source.path,
-        status=status,
-        reason=reason,
-        total_characters=total_characters,
-        text_pages=1 if total_characters else 0,
-        garbage_ratio=garbage_ratio,
-    )
-
-
-def _verify_docx(source: LocalSource) -> tuple[OCRReport, tuple[int, ...]]:
-    try:
-        text = _docx_text(source)
-    except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as error:
-        return OCRReport(source.path, "fail", f"DOCX extraction failed: {error}"), ()
-    return _docx_report(source, text), extract_exam_years(text)
-
-
-def verify_document_text(local_sources: list[LocalSource]) -> None:
-    for source in local_sources:
-        if source.is_preparation_planned:
-            source.ocr = OCRReport(
-                source.path,
-                "planned",
-                f"{source.preparation_action} will create the searchable upload artifact",
-            )
-            continue
-        if source.preparation_action == "use_remote":
-            source.ocr = OCRReport(
-                source.path,
-                "remote",
-                "A ready NotebookLM equivalent is authoritative; local text is not required",
-            )
-            continue
-        report: OCRReport | None = None
-        text_years: tuple[int, ...] = ()
-        effective_extension = source.upload_extension
-        if effective_extension == ".pdf":
-            report, text_years = _verify_pdf(source)
-        elif effective_extension == ".docx":
-            report, text_years = _verify_docx(source)
-        source.ocr = report
-        if not source.years_verified_by_manifest:
-            source.years = tuple(sorted(set(source.years).union(text_years)))
 
 
 def build_exam_year_map(local_sources: list[LocalSource]) -> dict[int, list[str]]:
@@ -3894,47 +3392,8 @@ def _assessment_source_scope(report: Phase0Report) -> QueryScope:
     return _build_query_scope(report, {"past_exam", "question_bank"}, ())
 
 
-def _truncate_query_fragment(text: str, limit: int) -> str:
-    """Return a readable, line-safe fragment for a provider-bound query."""
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    if limit <= 40:
-        return text[:limit]
-    shortened = text[: limit - 32].rsplit("\n", 1)[0].rstrip()
-    if not shortened:
-        shortened = text[: limit - 32].rstrip()
-    return f"{shortened}\n[remaining guidance omitted for query size]"
 
 
-def _compact_assessment_context(context: str) -> str:
-    """Keep only source identity lines in assessment prompts.
-
-    Guide/IMP prompts still receive the full authority manifest.  MCQ and
-    written-question prompts already receive the exact assessment source IDs
-    through ``--source-ids``; repeating the full manifest and enrichment
-    policy only increases the provider request size and can trigger its
-    generic ``invalid query`` response.  This fallback also protects callers
-    that pass the old full manifest directly to a prompt builder.
-    """
-    context = context.strip()
-    if len(context) <= MAX_ASSESSMENT_CONTEXT_CHARS:
-        return context
-
-    useful_lines: list[str] = []
-    for line in context.splitlines():
-        normalized = line.casefold()
-        if (
-            "verified past-exam" in normalized
-            or "question-bank" in normalized
-            or "canonical:" in normalized
-            or re.match(r"\s*-\s*20\d{2}:", line)
-        ):
-            useful_lines.append(line.strip())
-    compact = "\n".join(dict.fromkeys(useful_lines))
-    if not compact:
-        compact = context
-    return _truncate_query_fragment(compact, MAX_ASSESSMENT_CONTEXT_CHARS)
 
 
 def build_assessment_source_context(report: Phase0Report) -> str:
@@ -4049,345 +3508,28 @@ def canonical_badge_instructions(year_map: dict[int, list[str]]) -> str:
     )
 
 
-def render_exam_style_profile(
-    profile: dict[str, Any], max_chars: int | None = None
-) -> str:
-    """Render the agent's style observations as bounded, non-content guidance."""
-    if not profile:
-        rendered = (
-            "No agent-supplied exam style profile is available. Infer formatting "
-            "only from the verified past-exam/question-bank samples in the source scope."
-        )
-    else:
-        rendered = (
-            "AGENT-SUPPLIED EXAM STYLE PROFILE (format guidance only; never evidence or "
-            "medical content):\n"
-            + json.dumps(profile, ensure_ascii=False, indent=2)
-        )
-    return (
-        _truncate_query_fragment(rendered, max_chars)
-        if max_chars is not None
-        else rendered
-    )
 
 
-def build_guide_prompt(subject: str, title: str, context: str) -> str:
-    return f"""Create only the body of the 📖 Chronological Guide for {subject}: '{title}'.
-
-{context}
-The named recording is the sole authority for what the doctor said, the exact
-teaching chronology, emphasis, dialogue, jokes, anecdotes, pauses, and
-administrative remarks. Follow it step by step without summarizing, regrouping
-into textbook order, or inventing transitions. Preserve quoted speech and
-questions verbatim whenever the recording supports it.
-
-Write the explanation in Egyptian Arabic mixed with precise English medical
-terms. Use the slide source for titles, table structure, and figures that
-correspond to spoken material. Use textbooks/references for terminology,
-accuracy, and only the Agent-selected contextual details in the enrichment
-policy. Never dump reference material or present it as spoken commentary. If an
-unspoken book or slide detail directly clarifies a taught point, add it
-selectively in this exact form and do not attribute it to the doctor:
-> [!NOTE]
-> **إضافة من الكتاب/السلايد — لم يشرحها الدكتور في التسجيل**
-> concise contextual addition
-If a reference corrects a spoken terminology error, preserve what was said and
-add a clearly attributed NOTE. Surface conflicts for editorial review instead of
-silently choosing one source.
-
-Return section body only. Use ### and #### headings, never # or ##. Use only
-> [!NOTE], > [!IMPORTANT], > [!WARNING], and > [!CAUTION]. Reserve CAUTION for
-absolute contraindications, red flags, or lethal errors. Do not produce a summary."""
 
 
-def build_imp_prompt(title: str, context: str) -> str:
-    headings = "\n".join(IMP_HEADINGS)
-    return f"""Create only the body of the 🌟 IMP Points section for '{title}'.
-
-{context}
-Use only points explicitly emphasized or spoken in the recording. Do not add
-generic textbook high-yield facts. Return exactly these five #### headings in
-exactly this order and no other headings:
-{headings}
-
-Under Diagnostic Traps, put every item in a > [!WARNING] block. Under Lethal
-Mistakes, put every item in a > [!CAUTION] block. If either category has no
-explicit item, keep its heading and place an explicit 'None explicitly stated in
-the recording' message inside the required callout. Preserve every interactive
-doctor question and the answer actually given. Exam Rules includes grading,
-booklet, attendance, exam format, and other non-medical instructions. Write in
-Egyptian Arabic mixed with English medical terms. Return the section body only."""
 
 
-def build_mcq_prompt(
-    title: str,
-    context: str,
-    badge_instructions: str,
-    exam_style_profile: dict[str, Any] | None = None,
-) -> str:
-    context = _compact_assessment_context(context)
-    style_context = render_exam_style_profile(
-        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
-    )
-    return f"""Create only the body of the ❓ MCQs section for '{title}'.
-
-{context}
-Extract every relevant MCQ from verified past-exam or question-bank sources.
-STRICT LECTURE SCOPE CONSTRAINT: Extract ONLY questions directly relevant to the specific topics, mechanisms, and clinical conditions taught in this lecture's recording and slides for '{title}'. EXCLUDE questions belonging to other chapters or separate lectures that were not taught in this lecture (e.g. do not extract firearm wound mechanics or distant topics in a general mechanical wounds lecture). If a question's topic was not taught in this lecture, omit it entirely.
-Preserve the original wording and meaning but
-repair obvious OCR damage (split letters, joined words, and broken option
-labels). This is OCR normalization, not rewriting: never modernize, paraphrase,
-or improve the question's academic style. State the correct answer and give a concise
-clinical explanation in Egyptian Arabic mixed with precise English medical
-terms; explain distractors when the evidence supports it.
-
-{badge_instructions}
-
-{style_context}
-
-Search every verified past-exam source in the evidence catalog. If the same
-question and medically equivalent options appear in multiple verified years,
-return one block only, collect all years in ascending order, and include one
-**Source:** line for every supporting exam. Add **[Question Bank]** alongside
-the Past Exams badge when a question-bank copy also supports it. Do not merge
-questions when the options, negation, requested count, or clinical meaning differ.
-
-Before returning the section, perform an editorial pass: put one option on each
-line in the learned label order (a., b., c., d.), make Correct Answer start with an existing
-option label, remove NotebookLM citation markers such as [34،86], and stop on
-any word whose OCR cannot be restored confidently.
-
-For every item use this exact field contract with ### MCQ N and its badge(s):
-**Question:**, **Options:** (with each option on a new line: a. ..., b. ..., c. ..., d. ...),
-**Source:** (if past exam/question bank), **Correct Answer:**, and **Clinical Explanation:**.
-If no matching MCQ exists, return exactly {NO_MCQS}. Return section body only;
-never use # or ## headings."""
 
 
-MAX_EMPHASIS_CONTEXT_CHARS = 6_000
 
 
-def emphasis_point_count(imp_section: str) -> int:
-    """Count the individual points the IMP Points phase actually produced.
-
-    Bullets and callout lines are the unit the doctor's emphasis arrives in;
-    the five fixed #### headings are structure, not content.
-    """
-    count = 0
-    for line in (imp_section or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        body = stripped.lstrip("> ").strip()
-        if not body or body.startswith("[!"):
-            continue
-        if re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)", body):
-            count += 1
-    return count
 
 
-def _emphasis_minimum(point_count: int) -> int:
-    """How many IMP questions a section of this size should support."""
-    if point_count <= 0:
-        return 0
-    return max(3, min(12, point_count // 6))
 
 
-def _emphasis_context(imp_section: str, sentinel: str) -> str:
-    """Render the verified IMP Points section as input for the IMP prompts.
-
-    Before this the IMP prompts asked NotebookLM to rediscover the doctor's
-    emphasis from the recording, even though the IMP Points phase had already
-    produced and validated exactly that. On the OPs run the section held 274
-    lines of emphasis and the MCQ prompt still returned the no-questions
-    sentinel.
-    """
-    point_count = emphasis_point_count(imp_section)
-    if not point_count:
-        return (
-            f"If no emphasized point supports an item, return {sentinel} on the "
-            "first line followed by one sentence naming what was missing."
-        )
-    minimum = _emphasis_minimum(point_count)
-    body = _truncate_query_fragment(imp_section, MAX_EMPHASIS_CONTEXT_CHARS)
-    return f"""The 🌟 IMP Points section for this lecture has already been verified
-against the recording. It contains {point_count} emphasized point(s). Work from
-it directly instead of rediscovering the emphasis:
-
-<imp_points>
-{body}
-</imp_points>
-
-Cover the emphasized points that can carry a question. A section this size
-should support at least {minimum} item(s); returning fewer means the emphasis
-was not used. Returning {sentinel} is only acceptable if none of the
-{point_count} points can carry one, and it must be followed on the next line by
-one sentence naming why each category failed.
-Silence is not an acceptable answer."""
 
 
-def build_imp_mcq_prompt(
-    title: str,
-    exam_style_profile: dict[str, Any] | None = None,
-    imp_section: str = "",
-) -> str:
-    style_context = render_exam_style_profile(exam_style_profile or {})
-    emphasis_context = _emphasis_context(imp_section, NO_MCQS)
-    return f"""Create only IMP MCQs for '{title}' from points explicitly emphasized
-in the selected lecture recording. The selected slide source may clarify wording
-but must not introduce an unspoken fact.
-
-{emphasis_context}
-
-{style_context}
-
-Imitate the observed past-exam form exactly: stem length and command pattern,
-four-option layout, option labels and case, punctuation, capitalization,
-parallel option length, and distractor style. Do not copy a sample's subject
-matter, wording, answer, or provenance. Keep stems short and direct; do not make
-a clinical vignette unless the profile shows that pattern.
-
-For every item use ### MCQ N **[IMP]**, then **Question:**, **Options:**,
-**Correct Answer:**, and **Clinical Explanation:**. Put one
-option on each line (a., b., c., d.), ensure the correct answer starts with an existing option
-label, and use no Source field or verbatim label. Return section body only;
-never use # or ## headings."""
 
 
-def build_written_prompt(
-    title: str,
-    context: str,
-    badge_instructions: str,
-    exam_style_profile: dict[str, Any] | None = None,
-) -> str:
-    context = _compact_assessment_context(context)
-    style_context = render_exam_style_profile(
-        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
-    )
-    return f"""Create only the body of the ✍️ Written Questions section for '{title}'.
-
-{context}
-Extract every matching Essay, Short Note, Enumerate, Compare, Give Reason, or
-other written question from verified exam/question-bank sources.
-STRICT LECTURE SCOPE CONSTRAINT: Extract ONLY questions directly relevant to the specific topics, classifications, and concepts taught in this lecture's recording and slides for '{title}'. EXCLUDE questions belonging to other lectures or separate chapters that were not taught in this lecture. If a question was not taught, omit it entirely.
-Preserve the source wording and meaning while repairing obvious OCR damage in the question
-text; do not paraphrase it into a new academic prompt.
-
-{badge_instructions}
-
-{style_context}
-
-Search all verified assessment sources before returning the section. Merge only
-exact or OCR-safe duplicate written questions, preserving every verified year
-and source line. Keep questions with different command verbs, requested counts,
-scope, or medical meaning separate; send uncertain semantic matches for Agent
-review instead of merging them.
-
-For every item use ### Question N with badge(s), then **Question:**,
-**Source:** (if past exam/question bank), **Model Answer:**, and **Clinical Explanation:**.
-Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
-- For lists, blanks, and enumerations (e.g. 1... 2... 3...): provide only numbered concise keywords:
-  1- Concise keyword 1
-  2- Concise keyword 2
-  3- Concise keyword 3
-- For Give Reason: one concise clause (e.g. Due to inhibition of Cytochrome Oxidase).
-- For Compare: a compact Markdown table containing concise keywords.
-- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
-Clinical Explanation must be in Egyptian Arabic explaining the detailed clinical reasoning, mechanisms, and doctor emphasis.
-Run an editorial OCR pass before returning: repair split letters and joined words only when the source
-supports the repair, remove NotebookLM citation markers, and flag unresolved wording instead of
-guessing. No introduction, conclusion, or filler. If no grounded written
-question exists, return exactly {NO_WRITTEN}. Return section body only; never use
-# or ## headings."""
 
 
-def build_imp_written_prompt(
-    title: str,
-    exam_style_profile: dict[str, Any] | None = None,
-    imp_section: str = "",
-) -> str:
-    style_context = render_exam_style_profile(exam_style_profile or {})
-    emphasis_context = _emphasis_context(imp_section, NO_WRITTEN)
-    return f"""Create only IMP written questions for '{title}' from points explicitly
-emphasized in the selected lecture recording. The slide source may clarify
-wording but must not introduce an unspoken fact.
-
-{emphasis_context}
-
-{style_context}
-
-Imitate the observed past-exam form: use the same short command verbs,
-colon/dash/blank conventions, requested number of items, and concise numbered
-answer shape. Do not replace a direct complete, enumerate, causes of, mechanism
-of, treatment of, or give reason form with a long academic essay prompt unless
-the profile shows that pattern.
-
-For every item use ### Question N **[IMP]**, then **Question:**,
-**Model Answer:**, and **Clinical Explanation:**. Use no Source field or verbatim label.
-Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
-- For lists, blanks, and enumerations: provide only numbered concise keywords (1- Keyword 1\n2- Keyword 2\n...).
-- For Give Reason: one concise clause.
-- For Compare: a compact Markdown table with concise keywords.
-- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
-Clinical Explanation must be in Egyptian Arabic explaining the clinical reasoning and exam pearls.
-Return section body only; never use # or ## headings."""
 
 
-def build_case_prompt(
-    title: str,
-    context: str,
-    badge_instructions: str,
-    exam_style_profile: dict[str, Any] | None = None,
-) -> str:
-    context = _compact_assessment_context(context)
-    style_context = render_exam_style_profile(
-        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
-    )
-    return f"""Create only the body of the 🩺 Clinical Cases section for '{title}'.
-
-{context}
-
-{style_context}
-
-Create 2-3 clinically relevant cases within the recording's taught scope.
-STRICT LECTURE SCOPE CONSTRAINT: Sourced cases and questions MUST strictly fall within the taught scope, conditions, and mechanisms of '{title}' (recording and slides). Do not include case vignettes for other distinct lectures.
-Study past exam patterns and observed question structures from the course to match:
-- The typical case scenario style and length
-- For cases sourced from past exams, reproduce all original sub-questions verbatim in their exact count, text, and sequence without omitting or shortening any sub-questions.
-- For newly synthesized cases, questions MUST strictly follow the standard Egyptian medical exam case breakdown matching the subject/specialty (e.g. 1. Diagnosis / Most likely diagnosis, 2. DDx (Differential diagnosis) or Pathognomonic Clinical Picture (CP), 3. Diagnostic Investigations / Lab tests, 4. Treatment (TTT) / Specific Antidote / Emergency management / Precautions). NEVER create long essay sub-questions (e.g. 'Explain the dual physiological mechanisms...').
-- Clear, concise, standard clinical exam questions without filler.
-
-For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
-### Clinical Case N with evidence-backed badge(s)
-**Scenario:** concise clinical scenario
-**Questions:**
-1. What is the most likely diagnosis?
-2. What is the differential diagnosis (DDx) / characteristic clinical feature?
-3. Mention key diagnostic investigations.
-4. Outline the lines of treatment (TTT) / antidote.
-**Model Answer:**
-1. **Diagnosis:**
-   - Concise keyword answer (1 to 5 words)
-2. **DDx / Clinical Picture:**
-   - Concise keyword 1
-   - Concise keyword 2
-3. **Investigations:**
-   - Concise keyword
-4. **Treatment (TTT):**
-   - Concise keyword 1
-   - Concise keyword 2
-**Clinical Explanation:** Egyptian Arabic explanation covering comprehensive clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
-
-Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking scheme style, 1 to 5 words per point). NEVER write long sentences, descriptive narratives, or paragraphs inside Model Answer. Put all detailed medical explanations and lecture context exclusively in **Clinical Explanation** (in Egyptian Arabic).
-
-A case carrying a Past Exams or Question Bank badge must also contain
-**Source:** with the exact source name and verified year.
-
-{badge_instructions}
-Use a past-exam or question-bank badge only for a verbatim or traceably adapted
-cited scenario. Otherwise use exactly **[IMP]** only when the recording supports
-the emphasis. Never leave either side of a badge unbolded. Return section body
-only; never use # or ## headings."""
 
 
 def _body_heading_errors(text: str) -> list[str]:
@@ -5737,19 +4879,6 @@ def validate_cases(
     return errors + _long_case_answer_errors(answer)
 
 
-def format_markdown_tables(text: str) -> str:
-    lines = text.splitlines()
-    output: list[str] = []
-    for line in lines:
-        if (
-            line.strip().startswith("|")
-            and output
-            and output[-1].strip()
-            and not output[-1].strip().startswith("|")
-        ):
-            output.append("")
-        output.append(line.rstrip())
-    return "\n".join(output).strip()
 
 
 def clean_notebooklm_phrases(text: str) -> str:
@@ -6011,164 +5140,28 @@ def validate_final_document(text: str, verified_years: set[int]) -> None:
         raise ValidationError("Final document validation failed: " + "; ".join(errors))
 
 
-def _index_row(identity: TranscriptIdentity, target: OutputTarget) -> str:
-    encoded_name = urllib.parse.quote(target.file_name, safe="/")
-    return (
-        f"| {identity.emoji} {identity.title} | [فتح التفريغ](./{encoded_name}) | "
-        "شاملة الدليل الزمني وIMP Points وMCQs والأسئلة التحريرية "
-        "والحالات السريرية |\n"
-    )
 
 
-def _new_index(identity: TranscriptIdentity) -> str:
-    return (
-        f"# 📚 فهرس Transcripts محاضرات مادة ({identity.subject})\n\n"
-        "| اسم المحاضرة | رابط التفريغ | الملاحظات |\n"
-        "| :--- | :--- | :--- |\n"
-        "---\n*تم توليد وتحديث هذا الفهرس تلقائياً عبر "
-        "Universal Transcriber Engine.*\n"
-    )
 
 
-def _index_with_row(index_content: str, new_row: str) -> str:
-    lines = index_content.splitlines(keepends=True)
-    insert_at = next(
-        (index for index, line in enumerate(lines) if line.strip().startswith("---")),
-        len(lines),
-    )
-    lines.insert(insert_at, new_row)
-    return format_markdown_tables("".join(lines)) + "\n"
 
 
-def render_index_content(
-    identity: TranscriptIdentity, target: OutputTarget
-) -> tuple[str, str]:
-    index_path = os.path.join(target.transcripts_dir, "Index.md")
-    new_row = _index_row(identity, target)
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as index_file:
-            index_content = index_file.read()
-    else:
-        index_content = _new_index(identity)
-    encoded_name = urllib.parse.quote(target.file_name, safe="/")
-    if target.file_name in index_content or encoded_name in index_content:
-        return index_path, format_markdown_tables(index_content) + "\n"
-    return index_path, _index_with_row(index_content, new_row)
 
 
-def _prepare_temp(path: str, content: bytes) -> str:
-    directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
-    descriptor, temp_path = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as temp_file:
-            temp_file.write(content)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-    except OSError:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-        raise
-    return temp_path
 
 
-def _prepared_targets(targets: dict[str, bytes]) -> dict[str, str]:
-    prepared_paths: dict[str, str] = {}
-    try:
-        for path, content in targets.items():
-            prepared_paths[path] = _prepare_temp(path, content)
-    except OSError:
-        _remove_prepared_files(prepared_paths)
-        raise
-    return prepared_paths
 
 
-def _remove_prepared_files(prepared_paths: dict[str, str]) -> None:
-    for temp_path in prepared_paths.values():
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
 
 
-def _restore_replaced_files(
-    replaced: list[str], previous: dict[str, bytes | None]
-) -> list[str]:
-    restoration_errors: list[str] = []
-    for path in reversed(replaced):
-        try:
-            old_content = previous[path]
-            if old_content is None:
-                if os.path.exists(path):
-                    os.unlink(path)
-            else:
-                os.replace(_prepare_temp(path, old_content), path)
-        except OSError as restoration_error:  # pragma: no cover - catastrophic I/O
-            restoration_errors.append(f"{path}: {restoration_error}")
-    return restoration_errors
 
 
-def _existing_target_contents(targets: dict[str, bytes]) -> dict[str, bytes | None]:
-    return {
-        path: Path(path).read_bytes() if os.path.exists(path) else None
-        for path in targets
-    }
 
 
-def commit_transcript_and_index(
-    output_path: str, transcript: str, index_path: str, index_content: str
-) -> None:
-    targets = {
-        output_path: transcript.encode("utf-8"),
-        index_path: index_content.encode("utf-8"),
-    }
-    previous = _existing_target_contents(targets)
-    try:
-        prepared = _prepared_targets(targets)
-    except OSError as error:
-        raise TranscriberError(f"Atomic output preparation failed: {error}") from error
-    replaced: list[str] = []
-    try:
-        for path in targets:
-            os.replace(prepared[path], path)
-            replaced.append(path)
-        prepared.clear()
-    except OSError as error:
-        restoration_errors = _restore_replaced_files(replaced, previous)
-        detail = (
-            f"; restoration failed for {', '.join(restoration_errors)}"
-            if restoration_errors
-            else ""
-        )
-        raise TranscriberError(f"Atomic output commit failed: {error}{detail}") from error
-    finally:
-        _remove_prepared_files(prepared)
 
 
-def commit_managed_transcript(
-    identity: TranscriptIdentity, target: OutputTarget, transcript: str
-) -> str:
-    lock_path = Path(target.transcripts_dir) / ".transcriber-index.lock"
-    with _exclusive_file_lock(lock_path):
-        index_path, index_content = render_index_content(identity, target)
-        commit_transcript_and_index(
-            target.output_path,
-            transcript,
-            index_path,
-            index_content,
-        )
-    return index_path
 
 
-def _delete_review_draft(draft_path: str) -> None:
-    try:
-        Path(draft_path).unlink()
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        raise TranscriberError(
-            f"Final transcript committed but draft cleanup failed: {draft_path}: {error}"
-        ) from error
 
 
 def _argument_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
