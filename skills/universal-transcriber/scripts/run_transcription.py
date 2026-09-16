@@ -18,7 +18,10 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # imported lazily at runtime, so only the checker sees it
+    from question_bank import BankQuestion, QuestionBank
 
 from console import configure_console_streams
 from file_lock import exclusive_file_lock
@@ -1148,6 +1151,158 @@ def _execute_selected(
     return 0
 
 
+def _requested_years(raw: str | None) -> tuple[int, ...]:
+    """Parse --years as either a list (2022,2024) or a range (2020-2024)."""
+    if not raw:
+        return ()
+    text = raw.strip()
+    range_match = re.fullmatch(r"(\d{4})\s*-\s*(\d{4})", text)
+    if range_match:
+        first, last = int(range_match.group(1)), int(range_match.group(2))
+        if first > last:
+            first, last = last, first
+        return tuple(range(first, last + 1))
+    years = []
+    for part in re.split(r"[,\s]+", text):
+        if not part:
+            continue
+        if not re.fullmatch(r"\d{4}", part):
+            raise LauncherError(f"--years expects four-digit years, got {part!r}")
+        years.append(int(part))
+    return tuple(sorted(set(years)))
+
+
+def _requested_kinds(raw: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    from question_bank import KINDS
+
+    if not raw.strip():
+        return default
+    kinds = tuple(part.strip().casefold() for part in raw.split(",") if part.strip())
+    unknown = [kind for kind in kinds if kind not in KINDS]
+    if unknown:
+        raise LauncherError(
+            f"--kinds accepts {', '.join(KINDS)}; got {', '.join(unknown)}"
+        )
+    return kinds
+
+
+def _export_target(args: argparse.Namespace, context: LauncherContext, stem: str, suffix: str) -> Path:
+    if args.output:
+        return Path(args.output).expanduser()
+    return context.module.paths.transcripts / f"{stem}.{suffix}"
+
+
+def _run_question_bank(args: argparse.Namespace, context: LauncherContext) -> int:
+    from bank_export import (
+        ExportError,
+        render_bank_markdown,
+        write_csv,
+        write_json,
+        write_xlsx,
+    )
+    from question_bank import (
+        KINDS,
+        QuestionBankError,
+        build_bank,
+        filter_bank,
+        render_summary,
+        sample_exam,
+    )
+
+    if args.question_bank and args.exam:
+        raise LauncherError("--question-bank and --exam are separate commands")
+
+    try:
+        bank = build_bank(context.module.paths.transcripts, context.module.module_id)
+    except QuestionBankError as error:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+
+    years = _requested_years(args.years)
+    output_format = args.format.strip().casefold()
+
+    if args.exam:
+        kinds = _requested_kinds(args.kinds, ("mcq",))
+        questions = sample_exam(
+            bank, args.count, kinds=kinds, years=years, seed=args.seed
+        )
+        if not questions:
+            print("[!] No questions matched that selection", file=sys.stderr)
+            return 1
+        title = f"{context.module.display_name} exam ({len(questions)} questions)"
+        return _write_exam(args, context, bank, questions, title, output_format)
+
+    print(render_summary(bank))
+    kinds = _requested_kinds(args.kinds, KINDS)
+    questions = filter_bank(bank, kinds=kinds, years=years)
+    try:
+        if output_format == "csv":
+            result = write_csv(bank, _export_target(args, context, "question-bank", "csv"), questions)
+        elif output_format == "json":
+            result = write_json(bank, _export_target(args, context, "question-bank", "json"), questions)
+        elif output_format == "xlsx":
+            result = write_xlsx(bank, _export_target(args, context, "question-bank", "xlsx"), questions)
+        else:
+            target = _export_target(args, context, "question-bank", "md")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(render_bank_markdown(bank, questions), encoding="utf-8")
+            result = type("R", (), {"path": target, "written": len(questions)})()
+    except ExportError as error:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+    print(f"\nWrote {result.written} question(s) to {result.path}")
+    return 0
+
+
+def _write_exam(
+    args: argparse.Namespace,
+    context: LauncherContext,
+    bank: QuestionBank,
+    questions: tuple[BankQuestion, ...],
+    title: str,
+    output_format: str,
+) -> int:
+    from bank_export import (
+        ExportError,
+        render_exam_html,
+        render_exam_markdown,
+        write_csv,
+        write_docx,
+    )
+
+    try:
+        if output_format == "html":
+            target = _export_target(args, context, "exam", "html")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(render_exam_html(questions, title=title), encoding="utf-8")
+            print(f"Wrote a self-grading paper with {len(questions)} question(s) to {target}")
+            return 0
+        if output_format == "docx":
+            paper = _export_target(args, context, "exam", "docx")
+            key = paper.with_name(f"{paper.stem}-answers{paper.suffix}")
+            write_docx(bank, paper, questions, title=title)
+            write_docx(bank, key, questions, title=f"{title} — answer key", with_answers=True)
+            print(f"Wrote {paper} and {key}")
+            return 0
+        if output_format == "csv":
+            result = write_csv(bank, _export_target(args, context, "exam", "csv"), questions)
+            print(f"Wrote {result.written} question(s) to {result.path}")
+            return 0
+        paper_text, key_text = render_exam_markdown(questions, title=title)
+        paper = _export_target(args, context, "exam", "md")
+        key = paper.with_name(f"{paper.stem}-answers{paper.suffix}")
+        paper.parent.mkdir(parents=True, exist_ok=True)
+        paper.write_text(paper_text, encoding="utf-8")
+        key.write_text(key_text, encoding="utf-8")
+        # Two files on purpose: a paper with the answers under each question
+        # cannot be sat.
+        print(f"Wrote {paper} and {key}")
+        return 0
+    except ExportError as error:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+
+
 def _figure_slide_source(args: argparse.Namespace, context: LauncherContext) -> Path:
     """Which deck to illustrate: --slides if given, else the configured one."""
     if args.slides:
@@ -1255,6 +1410,39 @@ def _parser() -> argparse.ArgumentParser:
         help="DPI for --extract-figures (default 150)",
     )
     parser.add_argument(
+        "--question-bank",
+        action="store_true",
+        help=(
+            "Collect every question in the module's transcripts into one bank, "
+            "marking repeats, then exit"
+        ),
+    )
+    parser.add_argument(
+        "--exam",
+        action="store_true",
+        help="Draw an exam paper and a separate answer key from the bank, then exit",
+    )
+    parser.add_argument("--count", type=int, default=50, help="Questions in the --exam paper")
+    parser.add_argument(
+        "--years",
+        help="Restrict to these past-exam years: a list (2022,2024) or a range (2020-2024)",
+    )
+    parser.add_argument(
+        "--kinds",
+        default="",
+        help="Question kinds to include: mcq, written, case (comma separated)",
+    )
+    parser.add_argument(
+        "--format",
+        default="md",
+        help=(
+            "Output format: md, csv, json, html (self-grading paper), xlsx "
+            "(needs openpyxl) or docx (needs python-docx)"
+        ),
+    )
+    parser.add_argument("--output", help="Where to write the export (default: alongside Transcripts)")
+    parser.add_argument("--seed", type=int, help="Make --exam sampling reproducible")
+    parser.add_argument(
         "--all-slide-pages",
         action="store_true",
         help=(
@@ -1359,6 +1547,8 @@ def main() -> int:
         context = _launcher_context(args)
         if args.extract_figures:
             return _run_figure_extraction(args, context)
+        if args.question_bank or args.exam:
+            return _run_question_bank(args, context)
         if args.auto_manifest:
             if args.source_manifest:
                 raise LauncherError("--auto-manifest cannot be combined with --source-manifest")

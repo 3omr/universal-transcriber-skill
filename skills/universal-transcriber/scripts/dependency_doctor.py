@@ -189,6 +189,22 @@ DEPENDENCIES: tuple[Dependency, ...] = (
         python_module="genanki",
     ),
     Dependency(
+        name="openpyxl",
+        executables=(),
+        purpose="Excel export of the question bank (--format xlsx)",
+        install_hint="pip install openpyxl",
+        required=False,
+        python_module="openpyxl",
+    ),
+    Dependency(
+        name="python-docx",
+        executables=(),
+        purpose="Word export of an exam paper (--format docx)",
+        install_hint="pip install python-docx",
+        required=False,
+        python_module="docx",
+    ),
+    Dependency(
         name="reportlab",
         executables=(),
         purpose="Rendering plain-text question banks to PDF before upload",

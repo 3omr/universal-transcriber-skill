@@ -123,6 +123,54 @@ nine pages.
 Pass `--slides` to point at a specific deck, `--all-slide-pages` to render
 everything, and `--figure-resolution` to change the DPI (default 150).
 
+### The module's question bank
+
+A question used to exist only inside the transcript that produced it. That is
+the wrong unit for revision — nobody studies one lecture's MCQs the night
+before a paper — and it meant nothing could answer *"what has been asked every
+year since 2022?"*
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module ophtha --question-bank --format xlsx
+```
+
+```
+Question bank for ophtha: 81 unique of 82 across 4 lecture(s)
+  mcq        16 unique /   16 total
+  written    52 unique /   53 total
+  case       13 unique /   13 total
+  1 repeat(s) kept and marked
+  past exam years -- 2022: 8, 2023: 14, 2024: 17, 2025: 14
+```
+
+Repeats are **marked, not dropped**: the same question appearing in several
+lectures says something about what the examiners care about, and the canonical
+copy absorbs every year its repeats claimed. Exam sampling then uses that as a
+weight.
+
+### Sitting a mock exam
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module ophtha --exam --count 50 --years 2020-2024
+```
+
+Writes the paper and the answer key as **two** files — a paper with the answers
+under each question cannot be sat. Questions are drawn a lecture at a time in
+rotation so one lecture cannot dominate, and within a lecture the ones that
+recur across years come first.
+
+`--format html` instead writes a single self-contained page that marks itself:
+no dependency, no network, no build step — one file you can open on a phone.
+`--seed` makes a paper reproducible.
+
+| `--format` | needs |
+| --- | --- |
+| `md` (default), `csv`, `json`, `html` | nothing |
+| `xlsx` | `pip install openpyxl` |
+| `docx` | `pip install python-docx` |
+
 ### Checking a module's transcripts
 
 ```bash
