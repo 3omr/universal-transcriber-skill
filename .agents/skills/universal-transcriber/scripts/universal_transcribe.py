@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import date
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from xml.etree import ElementTree
 
 from file_lock import exclusive_file_lock
@@ -2241,8 +2241,7 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
     report.preparation = preparation
     report.reference_guidance = _reference_guidance_from_preparation(preparation)
     report.assessment_sources = request.assessment_sources
-    report.evidence_catalog = build_evidence_catalog(report)
-    report.year_map = _year_map_from_catalog(report.evidence_catalog)
+    _rebuild_evidence_catalog(report)
     report.blocking_errors.extend(preparation.blocking_errors)
     return report
 
@@ -2330,8 +2329,7 @@ def _refresh_evidence_metadata(report: Phase0Report) -> None:
         source.name for source in remotely_available if source.role == "question_bank"
     )
     report.question_bank_links = link_exam_sources_to_question_banks(remotely_available)
-    report.evidence_catalog = build_evidence_catalog(report)
-    report.year_map = _year_map_from_catalog(report.evidence_catalog)
+    _rebuild_evidence_catalog(report)
 
 
 def _approved_upload_candidates(
@@ -2656,6 +2654,9 @@ def run_phase0_sync(request: Phase0Request) -> Phase0Report:
     if not report.blocking_errors:
         _upload_phase0_sources(request, report)
     _resolve_remote_authority(request, report)
+    # selected_for_run is derived from the resolved authority, so the catalog
+    # built during the initial report is stale by definition.
+    _rebuild_evidence_catalog(report)
     print_phase0_report(report)
     if report.blocking_errors:
         raise Phase0Error("; ".join(report.blocking_errors))
@@ -2668,6 +2669,7 @@ def run_phase0_audit(request: Phase0Request) -> Phase0Report:
     _append_ocr_failures(report)
     _append_ambiguous_matches(request, report)
     _resolve_audit_authority(request, report)
+    _rebuild_evidence_catalog(report)
     print_phase0_audit_report(report)
     return report
 
@@ -3341,13 +3343,47 @@ def _remote_sources_for_local(
     ]
 
 
+ALWAYS_SELECTED_ROLES = frozenset({"textbook", "reference", "handout"})
+ASSESSMENT_ROLES = frozenset({"past_exam", "question_bank"})
+
+
+def _authority_match_keys(report: Phase0Report) -> tuple[set[str], set[str]]:
+    """Return the normalized names and stems of this run's authority sources.
+
+    Both are empty until ``resolve_*_source_authority`` has run, which is why
+    the catalog has to be built after authority resolution rather than before.
+    """
+    authority_names = (*report.recording_sources, report.slide_source)
+    return (
+        {normalize_source_key(name) for name in authority_names if name},
+        {normalize_source_stem(name) for name in authority_names if name},
+    )
+
+
+def _names_match_authority(
+    names: Iterable[str], authority_keys: set[str], authority_stems: set[str]
+) -> bool:
+    return any(
+        normalize_source_key(name) in authority_keys
+        or normalize_source_stem(name) in authority_stems
+        for name in names
+        if name
+    )
+
+
 def _local_evidence_entry(
-    report: Phase0Report, local_source: LocalSource
+    report: Phase0Report,
+    local_source: LocalSource,
+    authority_keys: set[str] | None = None,
+    authority_stems: set[str] | None = None,
 ) -> tuple[tuple[str, str], dict[str, Any]]:
     remotes = _remote_sources_for_local(report, local_source)
     canonical_name = remotes[0].title if remotes else local_source.name
     source_ids = _unique_strings([remote.source_id for remote in remotes])
     notebook_ids = _unique_strings([remote.notebook_uuid for remote in remotes])
+    aliases = _unique_strings([local_source.name, *(remote.title for remote in remotes)])
+    if authority_keys is None or authority_stems is None:
+        authority_keys, authority_stems = _authority_match_keys(report)
     return (
         (normalize_source_key(canonical_name), local_source.role),
         {
@@ -3363,10 +3399,13 @@ def _local_evidence_entry(
             else [],
             "local_path": local_source.original_path or local_source.path,
             "remote_status": [remote.status or "available" for remote in remotes],
-            "aliases": _unique_strings(
-                [local_source.name, *(remote.title for remote in remotes)]
-            ),
+            "aliases": aliases,
             "content_status": "available" if remotes else "local_only",
+            "selected_for_run": (
+                local_source.role in ALWAYS_SELECTED_ROLES
+                or local_source.role in ASSESSMENT_ROLES
+                or _names_match_authority(aliases, authority_keys, authority_stems)
+            ),
         },
     )
 
@@ -3401,33 +3440,16 @@ def _remote_only_evidence_entry(
             remote.normalized_name in authority_keys
             or remote.normalized_stem in authority_stems
             or assessment is not None
-            or role in {"textbook", "reference", "handout"}
+            or role in ALWAYS_SELECTED_ROLES
         ),
-
     }
 
 
-def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
-    """Build the canonical source inventory used by prompts and validators."""
-    catalog: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str, str]] = set()
-    for local_source in (source for source in report.local_sources if source.role != "ignore"):
-        key, entry = _local_evidence_entry(report, local_source)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        catalog.append(entry)
-    local_keys = {
-        normalize_source_key(str(entry.get("canonical_name", "")))
-        for entry in catalog
-    }
-    authority_names = (*report.recording_sources, report.slide_source)
-    authority_keys = {normalize_source_key(name) for name in authority_names if name}
-    authority_stems = {normalize_source_stem(name) for name in authority_names if name}
-    assessment_metadata: dict[str, tuple[str, tuple[int, ...]]] = {}
+def _assessment_metadata(report: Phase0Report) -> dict[str, tuple[str, tuple[int, ...]]]:
+    metadata: dict[str, tuple[str, tuple[int, ...]]] = {}
     for assessment_source in report.assessment_sources:
         source_type = str(assessment_source.get("type", "")).strip()
-        if source_type not in {"past_exam", "question_bank"}:
+        if source_type not in ASSESSMENT_ROLES:
             continue
         path = str(assessment_source.get("path", "")).strip()
         if not path:
@@ -3444,14 +3466,76 @@ def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
             normalize_source_key(os.path.basename(path)),
             normalize_source_stem(path),
         }:
-            assessment_metadata[key] = (source_type, years)
-    catalog.extend(
-        _remote_only_evidence_entry(
+            metadata[key] = (source_type, years)
+    return metadata
+
+
+def _merge_remote_entry(target: dict[str, Any], extra: dict[str, Any]) -> None:
+    """Fold a duplicate NotebookLM upload into the entry already in the catalog.
+
+    The same file can be uploaded to a notebook several times; each upload gets
+    its own source id but they are one piece of evidence, so the ids are merged
+    rather than emitted as separate catalog entries.
+    """
+    for list_key in ("source_ids", "notebook_ids", "remote_status", "aliases"):
+        target[list_key] = _unique_strings([*target[list_key], *extra[list_key]])
+    target["source_id"] = (
+        target["source_ids"][0] if len(target["source_ids"]) == 1 else ""
+    )
+    target["notebook_id"] = (
+        target["notebook_ids"][0] if len(target["notebook_ids"]) == 1 else ""
+    )
+    target["selected_for_run"] = bool(
+        target["selected_for_run"] or extra["selected_for_run"]
+    )
+    if extra["content_status"] == "remote_only":
+        target["content_status"] = "remote_only"
+    target["verified_years"] = sorted(
+        {*target["verified_years"], *extra["verified_years"]}
+    )
+
+
+def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
+    """Build the canonical source inventory used by prompts and validators.
+
+    ``selected_for_run`` is derived from ``report.recording_sources`` and
+    ``report.slide_source``, so this must be called *after* the authority has
+    been resolved.  ``_rebuild_evidence_catalog`` is the guarded entry point.
+    """
+    authority_keys, authority_stems = _authority_match_keys(report)
+    assessment_metadata = _assessment_metadata(report)
+    catalog: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for local_source in (source for source in report.local_sources if source.role != "ignore"):
+        key, entry = _local_evidence_entry(
+            report, local_source, authority_keys, authority_stems
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        catalog.append(entry)
+    local_keys = {
+        normalize_source_key(str(entry.get("canonical_name", "")))
+        for entry in catalog
+    }
+    remote_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for remote in report.remote_sources:
+        if normalize_source_key(remote.title) in local_keys:
+            continue
+        entry = _remote_only_evidence_entry(
             remote, authority_keys, authority_stems, assessment_metadata
         )
-        for remote in report.remote_sources
-        if normalize_source_key(remote.title) not in local_keys
-    )
+        remote_key = (
+            str(entry["normalized_name"]),
+            str(entry["role"]),
+            str(remote.notebook_uuid or ""),
+        )
+        existing = remote_by_key.get(remote_key)
+        if existing is None:
+            remote_by_key[remote_key] = entry
+            continue
+        _merge_remote_entry(existing, entry)
+    catalog.extend(remote_by_key.values())
     return sorted(
         catalog,
         key=lambda entry: (
@@ -3459,6 +3543,11 @@ def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
             str(entry.get("canonical_name", "")).casefold(),
         ),
     )
+
+
+def _rebuild_evidence_catalog(report: Phase0Report) -> None:
+    report.evidence_catalog = build_evidence_catalog(report)
+    report.year_map = _year_map_from_catalog(report.evidence_catalog)
 
 
 def _catalog_entry_is_available(entry: dict[str, Any]) -> bool:
@@ -5139,10 +5228,65 @@ def validate_mcqs(
         query_result, evidence.evidence_sources
     ):
         errors.append("MCQ citations do not include an exam/question-bank source")
-    if _has_combined_imp_badge(answer) and not _citations_include(
-        query_result, list(evidence.recording_sources)
-    ):
-        errors.append("MCQ combined Past Exams/IMP item lacks recording evidence")
+    errors += _combined_badge_recording_errors(
+        answer, "MCQ", query_result, evidence
+    )
+    return errors
+
+
+def _block_names_the_recording(
+    block: str, evidence: QuestionEvidence
+) -> bool:
+    """True when the block cites the lecture recording in a **Source:** field.
+
+    The field is not taken on trust: it has to resolve to an available catalog
+    entry whose role is ``recording``, or to one of this run's recording
+    sources.  Before the catalog was rebuilt after authority resolution the
+    recording was never available, which made the combined
+    ``[Past Exams (YYYY) / IMP]`` badge impossible to satisfy either way.
+    """
+    recording_names = [name for name in evidence.recording_sources if name]
+    for source_field in _source_fields(block):
+        if any(
+            _source_name_matches(source_field, expected)
+            for expected in recording_names
+        ):
+            return True
+        if any(
+            entry.get("role") == "recording"
+            for entry in _catalog_matches(source_field, evidence.evidence_catalog)
+            if _catalog_entry_is_available(entry)
+        ):
+            return True
+    return False
+
+
+def _combined_badge_recording_errors(
+    answer: str,
+    heading_prefix: str,
+    query_result: QueryResult,
+    evidence: QuestionEvidence,
+) -> list[str]:
+    """A combined Past Exams/IMP badge claims the doctor stressed the item.
+
+    That claim needs recording evidence: either NotebookLM cited the recording
+    for the whole answer, or the individual block names it as a source.
+    """
+    if not _has_combined_imp_badge(answer):
+        return []
+    if _citations_include(query_result, list(evidence.recording_sources)):
+        return []
+    errors: list[str] = []
+    for block in _section_blocks(answer, heading_prefix):
+        if not _has_combined_imp_badge(block):
+            continue
+        if _block_names_the_recording(block, evidence):
+            continue
+        number = _question_number(block, heading_prefix)
+        errors.append(
+            f"{heading_prefix} {number} [missing_recording_evidence]: the combined "
+            "Past Exams/IMP badge needs the recording cited or named in **Source:**"
+        )
     return errors
 
 
@@ -5191,10 +5335,9 @@ def validate_written(
     )
     errors += _long_model_answer_errors(answer, 2_000)
     errors += _written_editorial_errors(answer)
-    if _has_combined_imp_badge(answer) and not _citations_include(
-        query_result, list(evidence.recording_sources)
-    ):
-        errors.append("Written combined Past Exams/IMP item lacks recording evidence")
+    errors += _combined_badge_recording_errors(
+        answer, "Question", query_result, evidence
+    )
     if "**[IMP]**" not in answer and not _citations_include(
         query_result, evidence.evidence_sources
     ):

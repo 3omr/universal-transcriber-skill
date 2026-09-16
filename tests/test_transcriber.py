@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import json
 import multiprocessing
 import sys
@@ -2482,6 +2483,186 @@ class TranscriberTests(unittest.TestCase):
         self.assertNotIn("> [!TIP]", normalized_case)
         self.assertIn("**Model Answer:**", normalized_case)
         self.assertNotIn("(Short)", normalized_case)
+
+
+class EvidenceCatalogAuthorityTests(unittest.TestCase):
+    """Regressions for the catalog being built before the authority resolved."""
+
+    def _report(self):
+        report = phase0_report(
+            [
+                local_source("Questions/End 2022.pdf", "past_exam"),
+                local_source("Lecture/notes.pdf", "reference"),
+            ],
+            [
+                remote_source("rec-1", "مبيد حشرى.m4a", "nb-1"),
+                remote_source("slide-1", "OPs.pptx", "nb-1"),
+                remote_source("slide-2", "OPs.pptx", "nb-1"),
+                remote_source("slide-3", "OPs.pptx", "nb-1"),
+                remote_source("other-1", "Unrelated lecture.mp3", "nb-1"),
+            ],
+        )
+        report.recording_sources = ()
+        report.recording_source = ""
+        report.slide_source = ""
+        return report
+
+    def test_catalog_built_before_authority_selects_nothing(self):
+        report = self._report()
+        catalog = engine.build_evidence_catalog(report)
+        selected = {
+            entry["canonical_name"]
+            for entry in catalog
+            if entry["selected_for_run"]
+        }
+        # Only assessment and reference material is selectable without an
+        # authority; the recording and the slides are not.
+        self.assertNotIn("مبيد حشرى.m4a", selected)
+        self.assertNotIn("OPs.pptx", selected)
+
+    def test_rebuilding_after_authority_selects_the_run_sources(self):
+        report = self._report()
+        report.recording_sources = ("مبيد حشرى.m4a",)
+        report.recording_source = "مبيد حشرى.m4a"
+        report.slide_source = "OPs.pptx"
+        engine._rebuild_evidence_catalog(report)
+        by_name = {
+            entry["canonical_name"]: entry for entry in report.evidence_catalog
+        }
+        self.assertTrue(by_name["مبيد حشرى.m4a"]["selected_for_run"])
+        self.assertTrue(by_name["OPs.pptx"]["selected_for_run"])
+        self.assertFalse(by_name["Unrelated lecture.mp3"]["selected_for_run"])
+        self.assertTrue(engine._catalog_entry_is_available(by_name["مبيد حشرى.m4a"]))
+        self.assertTrue(engine._catalog_entry_is_available(by_name["OPs.pptx"]))
+
+    def test_duplicate_remote_uploads_collapse_into_one_entry(self):
+        report = self._report()
+        report.slide_source = "OPs.pptx"
+        engine._rebuild_evidence_catalog(report)
+        slides = [
+            entry
+            for entry in report.evidence_catalog
+            if entry["canonical_name"] == "OPs.pptx"
+        ]
+        self.assertEqual(len(slides), 1)
+        self.assertEqual(
+            sorted(slides[0]["source_ids"]), ["slide-1", "slide-2", "slide-3"]
+        )
+        # Ambiguous once merged, so no single id is promoted.
+        self.assertEqual(slides[0]["source_id"], "")
+        self.assertEqual(slides[0]["notebook_id"], "nb-1")
+
+    def test_local_entries_state_selected_for_run_explicitly(self):
+        report = self._report()
+        engine._rebuild_evidence_catalog(report)
+        local_entries = [
+            entry
+            for entry in report.evidence_catalog
+            if entry["content_status"] == "local_only"
+        ]
+        self.assertTrue(local_entries)
+        for entry in local_entries:
+            self.assertIn("selected_for_run", entry)
+            self.assertIsInstance(entry["selected_for_run"], bool)
+
+    def test_phase0_entry_points_rebuild_after_resolving_authority(self):
+        for runner, resolver in (
+            (engine.run_phase0_sync, "_resolve_remote_authority"),
+            (engine.run_phase0_audit, "_resolve_audit_authority"),
+        ):
+            source = inspect.getsource(runner)
+            self.assertIn(resolver, source)
+            self.assertLess(
+                source.index(resolver),
+                source.index("_rebuild_evidence_catalog"),
+                f"{runner.__name__} must rebuild the catalog after {resolver}",
+            )
+
+
+class CombinedBadgeRecordingEvidenceTests(unittest.TestCase):
+    """A combined Past Exams/IMP badge must be reachable, not a deadlock."""
+
+    ANSWER = (
+        "### MCQ 1 **[Past Exams (2022) / IMP]**\n\n"
+        "**Question:** Atropine is used as an antidote in:\n"
+        "**Options:**\n"
+        "a. Organophosphates.\n"
+        "b. Opium.\n"
+        "c. Iron.\n"
+        "d. Lead.\n"
+        "**Correct Answer:** a. Organophosphates.\n"
+        "**Source:** مبيد حشرى.m4a and End 2022.pdf\n"
+        "**Clinical Explanation (Egyptian Arabic):** الأتروبين هو الترياق النوعي لتسمم المبيدات الفوسفورية وبيقفل الريسبتور المسكاريني."
+    )
+
+    def _evidence(self, recording_selected: bool):
+        catalog = [
+            {
+                "canonical_name": "End 2022.pdf",
+                "normalized_name": engine.normalize_source_key("End 2022.pdf"),
+                "aliases": ["End 2022.pdf"],
+                "role": "past_exam",
+                "verified_years": [2022],
+                "content_status": "available",
+                "selected_for_run": True,
+            },
+            {
+                "canonical_name": "مبيد حشرى.m4a",
+                "normalized_name": engine.normalize_source_key("مبيد حشرى.m4a"),
+                "aliases": ["مبيد حشرى.m4a"],
+                "role": "recording",
+                "verified_years": [],
+                "content_status": "remote_only",
+                "selected_for_run": recording_selected,
+            },
+        ]
+        return engine.QuestionEvidence(
+            {2022: ["End 2022.pdf"]},
+            ["End 2022.pdf"],
+            evidence_catalog=catalog,
+            recording_sources=("مبيد حشرى.m4a",),
+        )
+
+    def test_named_recording_source_satisfies_the_combined_badge(self) -> None:
+        result = engine.QueryResult(self.ANSWER, source_names=("End 2022.pdf",))
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=True))
+
+        self.assertEqual(errors, [])
+
+    def test_unavailable_recording_reproduces_the_old_deadlock(self) -> None:
+        # This is the pre-fix state: the recording is in the catalog but not
+        # selected for the run, so naming it cannot rescue the badge.
+        result = engine.QueryResult(self.ANSWER, source_names=("End 2022.pdf",))
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=False))
+
+        self.assertTrue(any("unknown_source" in error for error in errors))
+
+    def test_citations_alone_still_satisfy_the_combined_badge(self) -> None:
+        answer = self.ANSWER.replace(
+            "**Source:** مبيد حشرى.m4a and End 2022.pdf\n", "**Source:** End 2022.pdf\n"
+        )
+        result = engine.QueryResult(
+            answer, source_names=("End 2022.pdf", "مبيد حشرى.m4a")
+        )
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=True))
+
+        self.assertEqual(errors, [])
+
+    def test_no_recording_evidence_is_reported_per_question(self) -> None:
+        answer = self.ANSWER.replace(
+            "**Source:** مبيد حشرى.m4a and End 2022.pdf\n", "**Source:** End 2022.pdf\n"
+        )
+        result = engine.QueryResult(answer, source_names=("End 2022.pdf",))
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=True))
+
+        self.assertTrue(
+            any("MCQ 1 [missing_recording_evidence]" in error for error in errors),
+            errors,
+        )
 
 
 if __name__ == "__main__":
