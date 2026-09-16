@@ -53,8 +53,12 @@ Use these exact terms. Do not paraphrase or coin synonyms.
 
 11. **Edit `skills/` Only; `.agents/skills/` Is Generated**:
     - `skills/` is the source tree. `.agents/skills/` is a byte-for-byte mirror for Google Antigravity and Codex, regenerated with `bash scripts/sync-agents-mirror.sh`. Never hand-edit the mirror, and never import from it in tests. CI fails when the two drift.
-12. **One Version, One File**:
-    - The repository `VERSION` file is the source of truth. Bump it with `bash scripts/bump-version.sh <version>`, which also updates each skill's `FALLBACK_VERSION` (used only by standalone skill installs) and regenerates the mirror.
+12. **One Version, One File — And Nobody Bumps It By Hand**:
+    - The repository `VERSION` file is the source of truth for `FALLBACK_VERSION` in every skill and for `tests/test_version_checker.py`.
+    - **The Release workflow bumps it on merge.** Do not edit `VERSION` in a pull request; `scripts/bump-version.sh <version>` exists for the workflow and for a deliberate manual release, not for routine work.
+    - The bump comes from the PR itself: a `release:major` / `release:minor` / `release:patch` / `release:skip` label if one is set, otherwise the conventional-commit type in the PR **title** — `feat` → minor, `fix`/`perf`/`refactor`/`revert` → patch, `feat!:` or a `BREAKING CHANGE:` footer → major, and `chore`/`docs`/`ci`/`test`/`build`/`style` → no release at all. **So write PR titles as conventional commits**; a bot comments the planned version on every PR before it is merged.
+    - The decision lives in `scripts/next_version.py` and is covered by `tests/test_next_version.py`. Change the rules there, not in the workflow YAML.
+    - Users discover updates through the latest **GitHub release tag**, not the `VERSION` file in the repo — a merge that cuts no release is invisible to anyone who installed the skill.
 13. **Preflight External Tooling**:
     - The pipeline shells out to `nlm`, poppler, `ocrmypdf`, LibreOffice, Ghostscript, and `ffmpeg`. When a run fails on a missing tool, run `run_transcription.py --doctor` and report the install hint to the user rather than guessing or working around the gap.
 14. **Cross-Platform File Locking**:
