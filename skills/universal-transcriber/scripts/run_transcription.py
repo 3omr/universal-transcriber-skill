@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -14,12 +13,13 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
 
+from file_lock import exclusive_file_lock
 from module_registry import (
     ModuleConfig,
     ModuleConfigError,
@@ -31,6 +31,14 @@ from version_checker import (
     __version__,
     print_update_notice_if_available,
 )
+
+
+# Wall-clock ceilings for the engine subprocess. The engine checkpoints every
+# phase, so a run stopped at the ceiling resumes with --resume-latest rather than
+# starting over. Generous by design: five NotebookLM phases plus OCR and slide
+# conversion are legitimately slow.
+AUDIT_TIMEOUT_SECONDS = 30 * 60
+TRANSCRIPTION_TIMEOUT_SECONDS = 4 * 60 * 60
 
 
 class LauncherError(RuntimeError):
@@ -863,11 +871,32 @@ def _source_manifest(path: str) -> SourceManifest:
     )
 
 
+def _run_engine(command: list[str], source_root: Path, timeout: int, label: str) -> int:
+    """Run the engine as a subprocess under a wall-clock ceiling.
+
+    Without a timeout a wedged `nlm` call -- or a LibreOffice conversion that
+    never returns -- hangs the launcher forever, which is especially bad when a
+    sub-agent worker is waiting on it.
+    """
+    try:
+        return subprocess.run(
+            command, cwd=source_root, check=False, timeout=timeout
+        ).returncode
+    except subprocess.TimeoutExpired:
+        print(
+            f"[Launcher] {label} exceeded its {timeout}s limit and was stopped. "
+            "Rerun with --resume-latest to continue from the last checkpoint.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+
 def _run_audit(command: list[str], source_root: Path) -> int:
     print("[Launcher] Starting read-only Phase 0 audit...", flush=True)
-    return subprocess.run(
-        [*command, "--audit-only"], cwd=source_root, check=False
-    ).returncode
+    return _run_engine(
+        [*command, "--audit-only"], source_root, AUDIT_TIMEOUT_SECONDS, "Audit"
+    )
 
 
 def _run_transcription(command: list[str], source_root: Path) -> int:
@@ -878,7 +907,9 @@ def _run_transcription(command: list[str], source_root: Path) -> int:
         "[Launcher] Audit passed; starting the five transcription phases...",
         flush=True,
     )
-    return subprocess.run(command, cwd=source_root, check=False).returncode
+    return _run_engine(
+        command, source_root, TRANSCRIPTION_TIMEOUT_SECONDS, "Transcription"
+    )
 
 
 def _print_inventory(recordings: list[Any], pending: list[Any]) -> None:
@@ -918,11 +949,12 @@ def _lecture_lock(
 ) -> Iterator[None]:
     lecture_key = _lecture_key(module, recording, manifest)
     lock_directory = module.paths.root / ".transcriber-cache" / "locks"
-    lock_directory.mkdir(parents=True, exist_ok=True)
     lock_path = lock_directory / f"lecture-{lecture_key}.lock"
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
+    with ExitStack() as stack:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file = stack.enter_context(
+                exclusive_file_lock(lock_path, blocking=False)
+            )
         except BlockingIOError as error:
             title = manifest.title if manifest else recording.title
             raise LauncherError(
@@ -1059,6 +1091,15 @@ def _parser() -> argparse.ArgumentParser:
     target.add_argument("--all", action="store_true")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--list-modules", action="store_true")
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help=(
+            "Check that the external tooling the pipeline shells out to (nlm, "
+            "poppler, ocrmypdf, libreoffice, ghostscript, ffmpeg, genanki) is "
+            "installed, then exit"
+        ),
+    )
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument(
         "--sync-sources",
@@ -1140,6 +1181,10 @@ def main() -> int:
         except Exception:
             pass
     print_update_notice_if_available(workspace=workspace_for_cache, quiet=getattr(args, "no_update_check", False))
+    if args.doctor:
+        from dependency_doctor import report
+
+        return report()
     try:
         if bool(args.recovery_phase) != bool(args.recovery_response):
             raise LauncherError(

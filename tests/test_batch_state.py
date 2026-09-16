@@ -7,14 +7,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
-SCRIPT_PATH = (
+# skills/ is the source tree; .agents/skills is a generated mirror of it.
+SCRIPTS_DIR = (
     Path(__file__).parents[1]
-    / ".agents"
     / "skills"
     / "universal-transcriber"
     / "scripts"
-    / "batch_state.py"
 )
+SCRIPT_PATH = SCRIPTS_DIR / "batch_state.py"
+# The script imports its siblings by bare name, so make them importable first.
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 SPEC = importlib.util.spec_from_file_location("test_batch_state_script", SCRIPT_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Could not load the batch state helper")

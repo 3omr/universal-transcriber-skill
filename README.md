@@ -11,32 +11,76 @@
 
 ---
 
-## ⚡ Quick Install (تثبيت السكيل)
+## 📋 Prerequisites
 
-Choose your agent platform below to install the skill:
+The skills shell out to external tooling that is **not** installed by the skill
+manager. Install these before your first transcription:
+
+| Tool | Needed for | Install |
+| --- | --- | --- |
+| **`nlm`** (required) | Every NotebookLM query, upload, and source listing | [github.com/tmc/nlm](https://github.com/tmc/nlm), then `nlm auth` |
+| **poppler-utils** (required) | Reading a PDF's text layer to decide whether it needs OCR | `apt install poppler-utils` / `brew install poppler` |
+| **ocrmypdf** | OCR for scanned past-exam PDFs with no text layer | `apt install ocrmypdf` / `brew install ocrmypdf` |
+| **libreoffice** | Converting PPTX/PPSX/DOCX slides to PDF before upload | `apt install libreoffice` / `brew install --cask libreoffice` |
+| **ghostscript** | Compressing PDFs over the NotebookLM upload limit | `apt install ghostscript` / `brew install ghostscript` |
+| **ffmpeg** | Normalizing recordings NotebookLM will not accept | `apt install ffmpeg` / `brew install ffmpeg` |
+
+Python packages (only `genanki`, for native `.apkg` decks):
+
+```bash
+pip install -r requirements.txt
+```
+
+Then verify everything at once — this exits non-zero if anything required is missing:
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py --doctor
+```
+
+Python 3.10 or newer is required.
+
+---
+
+## ⚡ Quick Install (تثبيت السكيل)
 
 ### Option 1: skills.sh / Universal AI Agent CLI (Recommended)
 ```bash
 npx skills add 3omr/universal-transcriber-skill
 ```
 
-### Option 2: Google Antigravity & Codex
-Install directly into your workspace's `.agents/skills` directory:
+### Option 2: Clone the repository and work inside it
+
+This is the layout the project is built around — `modules/` holds your course
+data, and the skills resolve the workspace with `git rev-parse --show-toplevel`:
+
 ```bash
-mkdir -p .agents/skills
-git clone https://github.com/3omr/universal-transcriber-skill.git .agents/skills/universal-transcriber
+git clone https://github.com/3omr/universal-transcriber-skill.git
+cd universal-transcriber-skill
 ```
 
-### Option 3: Claude Code (Global Skill)
-Install globally to make it available across all your Claude Code workspaces:
+Claude Code picks up `skills/` and `AGENTS.md` automatically; Google Antigravity
+and Codex pick up the `.agents/skills/` mirror.
+
+### Option 3: Claude Code (global skills)
+
+Each skill is its own directory, so link them individually — pointing
+`~/.claude/skills/<name>` at the repository root would nest `SKILL.md` one level
+too deep and Claude Code would not find it:
+
 ```bash
-git clone https://github.com/3omr/universal-transcriber-skill.git ~/.claude/skills/universal-transcriber
+git clone https://github.com/3omr/universal-transcriber-skill.git ~/src/universal-transcriber-skill
+mkdir -p ~/.claude/skills
+for skill in universal-transcriber transcriber-anki transcriber-setup; do
+  ln -s ~/src/universal-transcriber-skill/skills/"$skill" ~/.claude/skills/"$skill"
+done
 ```
 
-### Option 4: Cursor / Windsurf / Other Editors
-Clone into your repository or add as a git submodule:
+### Option 4: Cursor / Windsurf / other editors
+
+Add the repository as a submodule, then reference `skills/<name>/SKILL.md`:
+
 ```bash
-git clone https://github.com/3omr/universal-transcriber-skill.git skills/universal-transcriber
+git submodule add https://github.com/3omr/universal-transcriber-skill.git vendor/universal-transcriber-skill
 ```
 
 ---
@@ -112,6 +156,9 @@ Every finalized lecture transcript strictly adheres to five structured sections:
 ## Quick CLI Reference
 
 ```bash
+# 0. Verify external tooling (exits non-zero if anything required is missing)
+python3 skills/universal-transcriber/scripts/run_transcription.py --doctor
+
 # 1. List available medical modules
 python3 skills/universal-transcriber/scripts/run_transcription.py --workspace "$PWD" --list-modules
 
@@ -137,20 +184,19 @@ python3 skills/universal-transcriber/scripts/run_transcription.py \
 ```text
 universal-medical-lecture-transcriber/
 ├── AGENTS.md                              # Agent instructions, conventions, and terminology
+├── VERSION                                # Single source of truth for the release version
+├── requirements.txt                       # Python dependencies (genanki)
 ├── skills.sh.json                         # Skills registry configuration
-├── skills/
+├── skills/                                # Source tree for all three skills
 │   ├── universal-transcriber/
 │   │   ├── SKILL.md                       # Streamlined 5-step transcription skill
 │   │   ├── references/                    # Progressive disclosure reference guides
-│   │   │   ├── source-sync-and-manifest.md
-│   │   │   ├── drafting-and-editorial.md
-│   │   │   ├── exam-style.md
-│   │   │   ├── multi-agent.md
-│   │   │   └── modules.md
-│   │   └── scripts/                       # CLI runners and state helpers
-│   └── transcriber-setup/
-│       └── SKILL.md                       # Setup skill for module & notebook configuration
-├── modules/                               # Canonical storage for medical modules
+│   │   └── scripts/                       # CLI launcher, engine, and state helpers
+│   ├── transcriber-anki/                  # Flashcard generation skill
+│   └── transcriber-setup/                 # Module & notebook configuration skill
+├── .agents/skills/                        # Generated mirror of skills/ for Antigravity & Codex
+├── scripts/                               # Maintenance: version bump, mirror sync & drift check
+├── modules/                               # Canonical storage for medical modules (gitignored)
 │   └── toxo/
 │       ├── module.json
 │       ├── Lecture/                       # Audio recordings, slides, textbooks
@@ -168,6 +214,20 @@ universal-medical-lecture-transcriber/
 - [**Exam Style & Grounded Questions**](skills/universal-transcriber/references/exam-style.md) — Past exam sampling, question deduplication, and badge rules.
 - [**Multi-Agent Orchestration**](skills/universal-transcriber/references/multi-agent.md) — Native sub-agent worker packets, batch ledger, and capacity scheduling.
 - [**Module Management**](skills/universal-transcriber/references/modules.md) — `module.json` schema, folder structure, and setup CLI.
+
+---
+
+## Contributing
+
+Edit `skills/` only. `.agents/skills/` is a generated mirror; regenerate it and
+bump versions with the maintenance scripts, and CI fails if the two drift:
+
+```bash
+bash scripts/sync-agents-mirror.sh     # regenerate .agents/skills from skills/
+bash scripts/check-agents-mirror.sh    # verify they match (runs in CI)
+bash scripts/bump-version.sh 1.4.0     # set VERSION and both fallback constants
+python3 -m unittest discover -s tests -t tests
+```
 
 ---
 

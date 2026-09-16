@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from file_lock import exclusive_file_lock
 
 
 class BatchStateError(RuntimeError):
@@ -145,9 +146,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 @contextmanager
 def _ledger_lock(ledger_path: Path) -> Iterator[None]:
     lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    with exclusive_file_lock(lock_path):
         yield
 
 

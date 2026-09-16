@@ -9,9 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+# skills/ is the source tree; .agents/skills is a generated mirror of it.
 SCRIPTS_DIR = (
     Path(__file__).parents[1]
-    / ".agents"
     / "skills"
     / "universal-transcriber"
     / "scripts"

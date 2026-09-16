@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import fcntl
 import hashlib
 import json
 import os
@@ -19,29 +18,21 @@ import time
 import unicodedata
 import urllib.parse
 import zipfile
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import date
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from xml.etree import ElementTree
 
-try:
-    from universal_transcriber.source_preparation import (
-        PreparationReport,
-        PreparedSource,
-        automatic_preparation_manifest,
-        prepare_manifest_sources,
-        render_preparation_report,
-    )
-except ModuleNotFoundError:  # Direct execution from universal_transcriber/.
-    from source_preparation import (  # type: ignore[no-redef]
-        PreparationReport,
-        PreparedSource,
-        automatic_preparation_manifest,
-        prepare_manifest_sources,
-        render_preparation_report,
-    )
+from file_lock import exclusive_file_lock
+from source_preparation import (
+    PreparationReport,
+    PreparedSource,
+    automatic_preparation_manifest,
+    prepare_manifest_sources,
+    render_preparation_report,
+)
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -86,9 +77,7 @@ MIN_REASONABLE_EXAM_YEAR = 2000
 
 @contextmanager
 def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    with exclusive_file_lock(lock_path):
         yield
 
 
@@ -175,6 +164,7 @@ MEDICAL_OCR_ALLOWLIST = frozenset({
     "quadrant",
     "radiotherapy",
     "succimer",
+    "transparency",
 })
 NOTEBOOK_CITATION_PATTERN = re.compile(
     r"\[\s*\d+(?:\s*[,،、;\-–—]\s*\d+)*\s*\]"
@@ -6704,81 +6694,117 @@ def _phase_query_functions(context: PipelineContext) -> dict[str, Callable[[], Q
     }
 
 
+def _phase_checkpoint_guard(
+    checkpoint_lock: threading.Lock | None,
+) -> AbstractContextManager[Any]:
+    """Serialize checkpoint writes when phases run concurrently."""
+    return checkpoint_lock if checkpoint_lock is not None else nullcontext()
+
+
+def _run_phase_query(
+    phase: str,
+    query_function: Callable[[], QueryResult],
+    run_dir: Path,
+    checkpoint: dict[str, Any],
+    checkpoint_lock: threading.Lock | None = None,
+) -> QueryResult:
+    """Mark a phase running, run it, and checkpoint the validated answer.
+
+    Failures are normalized to PhaseValidationError but not persisted; the
+    caller decides whether to retry (by replacing quarantined sources) or to
+    record the failure with _record_phase_failure.
+    """
+    guard = _phase_checkpoint_guard(checkpoint_lock)
+    with guard:
+        _save_phase_checkpoint(
+            PhaseCheckpointUpdate(run_dir, checkpoint, phase, "running")
+        )
+    try:
+        query_result = query_function()
+    except PhaseValidationError:
+        raise
+    except (TranscriberError, OSError) as error:
+        source_quarantine = (
+            error.source_quarantine if isinstance(error, NlmError) else ()
+        )
+        raise PhaseValidationError(
+            phase, [str(error)], source_quarantine=source_quarantine
+        ) from error
+    with guard:
+        _save_phase_checkpoint(
+            PhaseCheckpointUpdate(
+                run_dir,
+                checkpoint,
+                phase,
+                "validated",
+                query_result.answer,
+                source_quarantine=query_result.source_quarantine,
+            )
+        )
+        print(f"[Checkpoint] {PHASE_LABELS[phase]} passed and checkpointed")
+    return query_result
+
+
+def _record_phase_failure(
+    phase: str,
+    error: Exception,
+    run_dir: Path,
+    checkpoint: dict[str, Any],
+    checkpoint_lock: threading.Lock | None = None,
+) -> None:
+    """Persist a failed phase plus the recovery bundle the Agent repairs from."""
+    if isinstance(error, PhaseValidationError):
+        answer = error.answer
+        errors = tuple(error.errors)
+        source_names = error.source_names
+        source_quarantine = error.source_quarantine
+    else:
+        answer = ""
+        errors = (str(error),)
+        source_names = ()
+        source_quarantine = (
+            error.source_quarantine if isinstance(error, NlmError) else ()
+        )
+    with _phase_checkpoint_guard(checkpoint_lock):
+        _save_phase_checkpoint(
+            PhaseCheckpointUpdate(
+                run_dir,
+                checkpoint,
+                phase,
+                "failed",
+                answer,
+                errors,
+                source_quarantine,
+            )
+        )
+        _write_recovery_bundle(
+            RecoveryBundle(
+                run_dir,
+                phase,
+                answer,
+                errors,
+                checkpoint,
+                source_names,
+                source_quarantine,
+            )
+        )
+
+
 def _execute_checkpointed_phase(
     phase: str,
     query_function: Callable[[], QueryResult],
     run_dir: Path,
     checkpoint: dict[str, Any],
+    checkpoint_lock: threading.Lock | None = None,
 ) -> QueryResult:
-    _save_phase_checkpoint(
-        PhaseCheckpointUpdate(run_dir, checkpoint, phase, "running")
-    )
+    """Run one phase, recording the failure and recovery bundle if it fails."""
     try:
-        query_result = query_function()
-    except PhaseValidationError as error:
-        _save_phase_checkpoint(
-            PhaseCheckpointUpdate(
-                run_dir,
-                checkpoint,
-                phase,
-                "failed",
-                error.answer,
-                tuple(error.errors),
-                error.source_quarantine,
-            )
+        return _run_phase_query(
+            phase, query_function, run_dir, checkpoint, checkpoint_lock
         )
-        _write_recovery_bundle(
-            RecoveryBundle(
-                run_dir,
-                phase,
-                error.answer,
-                tuple(error.errors),
-                checkpoint,
-                error.source_names,
-                error.source_quarantine,
-            )
-        )
+    except Exception as error:
+        _record_phase_failure(phase, error, run_dir, checkpoint, checkpoint_lock)
         raise
-    except (TranscriberError, OSError) as error:
-        errors = [str(error)]
-        source_quarantine = (
-            error.source_quarantine if isinstance(error, NlmError) else ()
-        )
-        _save_phase_checkpoint(
-            PhaseCheckpointUpdate(
-                run_dir,
-                checkpoint,
-                phase,
-                "failed",
-                errors=tuple(errors),
-                source_quarantine=source_quarantine,
-            )
-        )
-        _write_recovery_bundle(
-            RecoveryBundle(
-                run_dir,
-                phase,
-                "",
-                tuple(errors),
-                checkpoint,
-                source_quarantine=source_quarantine,
-            )
-        )
-        raise PhaseValidationError(
-            phase, errors, source_quarantine=source_quarantine
-        ) from error
-    _save_phase_checkpoint(
-        PhaseCheckpointUpdate(
-            run_dir,
-            checkpoint,
-            phase,
-            "validated",
-            query_result.answer,
-            source_quarantine=query_result.source_quarantine,
-        )
-    )
-    print(f"[Checkpoint] {PHASE_LABELS[phase]} passed and checkpointed")
-    return query_result
 
 
 def _run_checkpointed_phases(
@@ -6815,26 +6841,15 @@ def _run_checkpointed_phases(
             replacement_rounds = 0
             while True:
                 try:
-                    with checkpoint_lock:
-                        _save_phase_checkpoint(
-                            PhaseCheckpointUpdate(run_dir, checkpoint, phase, "running")
-                        )
-                    query_result = query_func()
-                    with checkpoint_lock:
-                        _save_phase_checkpoint(
-                            PhaseCheckpointUpdate(
-                                run_dir,
-                                checkpoint,
-                                phase,
-                                "validated",
-                                query_result.answer,
-                                source_quarantine=query_result.source_quarantine,
-                            )
-                        )
-                        print(f"[Checkpoint] {PHASE_LABELS[phase]} passed and checkpointed")
+                    query_result = _run_phase_query(
+                        phase, query_func, run_dir, checkpoint, checkpoint_lock
+                    )
                     return phase, query_result.answer, None
                 except PhaseValidationError as error:
-                    if error.source_quarantine and replacement_rounds < MAX_SOURCE_REPLACEMENT_ROUNDS:
+                    if (
+                        error.source_quarantine
+                        and replacement_rounds < MAX_SOURCE_REPLACEMENT_ROUNDS
+                    ):
                         replacement_rounds += 1
                         print(
                             f"[Recovery] {PHASE_LABELS[phase]} identified "
@@ -6861,46 +6876,14 @@ def _run_checkpointed_phases(
                                 error.source_names,
                                 error.source_quarantine,
                             )
-                    with checkpoint_lock:
-                        _save_phase_checkpoint(
-                            PhaseCheckpointUpdate(
-                                run_dir,
-                                checkpoint,
-                                phase,
-                                "failed",
-                                error.answer,
-                                tuple(error.errors),
-                                error.source_quarantine,
-                            )
-                        )
-                        _write_recovery_bundle(
-                            RecoveryBundle(
-                                run_dir,
-                                phase,
-                                error.answer,
-                                tuple(error.errors),
-                                checkpoint,
-                                error.source_names,
-                                error.source_quarantine,
-                            )
-                        )
+                    _record_phase_failure(
+                        phase, error, run_dir, checkpoint, checkpoint_lock
+                    )
                     return phase, None, error
                 except Exception as error:
-                    with checkpoint_lock:
-                        errors = [str(error)]
-                        source_quarantine = (
-                            error.source_quarantine if isinstance(error, NlmError) else ()
-                        )
-                        _save_phase_checkpoint(
-                            PhaseCheckpointUpdate(
-                                run_dir,
-                                checkpoint,
-                                phase,
-                                "failed",
-                                errors=tuple(errors),
-                                source_quarantine=source_quarantine,
-                            )
-                        )
+                    _record_phase_failure(
+                        phase, error, run_dir, checkpoint, checkpoint_lock
+                    )
                     return phase, None, error
 
         max_workers = min(len(pending_phases), 5)
@@ -6930,16 +6913,6 @@ def _run_checkpointed_phases(
         mcqs=results["mcqs"],
         written=results["written"],
         cases=results["cases"],
-    )
-
-
-def _generated_sections(context: PipelineContext) -> GeneratedSections:
-    return GeneratedSections(
-        guide=_query_guide(context).answer,
-        imp=_query_imp(context).answer,
-        mcqs=_query_mcqs(context).answer,
-        written=_query_written(context).answer,
-        cases=_query_cases(context).answer,
     )
 
 
