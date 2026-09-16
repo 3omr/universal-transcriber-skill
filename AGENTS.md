@@ -51,6 +51,17 @@ Use these exact terms. Do not paraphrase or coin synonyms.
     - During editorial review, the Agent / Worker Agent must cross-check every extracted Past Exam and Question Bank item against Section 1 (Chronological Guide) and the lecture's slide deck.
     - If an assessment question covers topics from another chapter or lecture that were neither explained by the doctor in the audio nor present in the slides (e.g. Firearm wounds in a Mechanical Wounds lecture), it must be pruned/deleted immediately. Questions in the transcript must test only the taught curriculum of that specific lecture. After pruning, re-index question numbers sequentially.
 
+11. **Edit `skills/` Only; `.agents/skills/` Is Generated**:
+    - `skills/` is the source tree. `.agents/skills/` is a byte-for-byte mirror for Google Antigravity and Codex, regenerated with `bash scripts/sync-agents-mirror.sh`. Never hand-edit the mirror, and never import from it in tests. CI fails when the two drift.
+12. **One Version, One File**:
+    - The repository `VERSION` file is the source of truth. Bump it with `bash scripts/bump-version.sh <version>`, which also updates each skill's `FALLBACK_VERSION` (used only by standalone skill installs) and regenerates the mirror.
+13. **Preflight External Tooling**:
+    - The pipeline shells out to `nlm`, poppler, `ocrmypdf`, LibreOffice, Ghostscript, and `ffmpeg`. When a run fails on a missing tool, run `run_transcription.py --doctor` and report the install hint to the user rather than guessing or working around the gap.
+14. **Cross-Platform File Locking**:
+    - Never `import fcntl` directly. Use `exclusive_file_lock` from `skills/universal-transcriber/scripts/file_lock.py`, which keeps `flock` semantics on POSIX and falls back to `msvcrt` on Windows.
+
+---
+
 ## Telegram Transcription Workflow
 
 When a Telegram message asks to transcribe a lecture or generate study materials, operate from this repository root and use the project-local launcher and skills. Resolve the requested module from `modules/<module_id>/module.json`; do not use a sibling checkout or a profile copy.
