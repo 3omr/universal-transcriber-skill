@@ -938,7 +938,7 @@ class TranscriberTests(unittest.TestCase):
         )
 
         with patch.object(
-            engine,
+            query_execution,
             "_run_nlm_json",
             side_effect=engine.NlmError(
                 "The query request is invalid. Check the notebook ID, source IDs, and query arguments."
@@ -1672,7 +1672,7 @@ class TranscriberTests(unittest.TestCase):
         )
 
         with patch.object(
-            engine,
+            query_execution,
             "_run_nlm_json",
             side_effect=engine.NlmError("nlm notebook query timed out"),
         ), self.assertRaises(engine.NlmError) as raised:
@@ -2724,9 +2724,9 @@ class RemoteInventoryCacheTests(unittest.TestCase):
             self.assertIsNotNone(engine._read_cached_inventory("nb-1"))
 
             completed = SimpleNamespace(returncode=0, stdout="{}", stderr="")
-            with patch.object(engine.subprocess, "run", return_value=completed):
+            with patch.object(nlm_client.subprocess, "run", return_value=completed):
                 with patch.object(
-                    engine, "_find_nlm_executable", return_value="nlm"
+                    nlm_client, "_find_nlm_executable", return_value="nlm"
                 ):
                     engine._run_nlm_json(
                         {}, ["source", "add", "nb-1", "f.pdf"], 10, "nlm source add"
