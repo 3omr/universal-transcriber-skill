@@ -252,5 +252,53 @@ class PlanScriptTests(unittest.TestCase):
         self.assertEqual(plan["bump"], "patch")
 
 
+class HeadlineTests(unittest.TestCase):
+    """The release page shows the title; a second prefix there reads badly."""
+
+    def test_the_conventional_prefix_is_dropped(self) -> None:
+        self.assertEqual(
+            next_version.release_headline("feat: add the coverage gate"),
+            "Add the coverage gate",
+        )
+
+    def test_a_scope_and_bang_are_dropped_too(self) -> None:
+        self.assertEqual(
+            next_version.release_headline("feat(engine)!: split the monolith"),
+            "Split the monolith",
+        )
+
+    def test_a_title_without_a_prefix_is_left_alone(self) -> None:
+        self.assertEqual(
+            next_version.release_headline("Plain title with no prefix"),
+            "Plain title with no prefix",
+        )
+
+    def test_an_already_capitalised_title_is_not_mangled(self) -> None:
+        self.assertEqual(
+            next_version.release_headline("fix: OCR the scanned papers"),
+            "OCR the scanned papers",
+        )
+
+    def test_an_empty_title_yields_nothing_rather_than_crashing(self) -> None:
+        self.assertEqual(next_version.release_headline(""), "")
+        self.assertEqual(next_version.release_headline("feat:"), "feat:")
+
+    def test_the_cli_prints_only_the_headline(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT),
+                "--current", "1.5.0",
+                "--title", "fix: repair the badge",
+                "--headline",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "Repair the badge")
+
+
 if __name__ == "__main__":
     unittest.main()

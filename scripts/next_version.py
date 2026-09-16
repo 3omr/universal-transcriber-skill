@@ -142,6 +142,19 @@ def decide(
     return Decision(bump, apply_bump(current, bump), reason)
 
 
+def release_headline(title: str) -> str:
+    """Turn a conventional-commit PR title into a release headline.
+
+    "feat(engine)!: split the monolith" reads better on a release page as
+    "Split the monolith" than as a second prefix sitting after the tag.
+    """
+    title = (title or "").strip()
+    stripped = TITLE_PATTERN.sub("", title, count=1).strip()
+    if not stripped:
+        return title
+    return stripped[:1].upper() + stripped[1:]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--current", required=True, help="The version in VERSION")
@@ -155,7 +168,16 @@ def main() -> int:
         help="A pull request label; repeat for several",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON")
+    parser.add_argument(
+        "--headline",
+        action="store_true",
+        help="Print only the release headline for --title and exit",
+    )
     args = parser.parse_args()
+
+    if args.headline:
+        print(release_headline(args.title))
+        return 0
 
     try:
         decision = decide(args.current, args.labels, args.title, args.body)
