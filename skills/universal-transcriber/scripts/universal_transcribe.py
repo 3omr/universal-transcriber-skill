@@ -26,6 +26,7 @@ from typing import Any, Callable, Iterable, Iterator
 from xml.etree import ElementTree
 
 from file_lock import exclusive_file_lock
+from question_coverage import build_report as build_question_coverage_report
 from source_preparation import (
     PreparationReport,
     PreparedSource,
@@ -53,10 +54,20 @@ MAX_ASSESSMENT_CONTEXT_CHARS = 900
 MAX_ASSESSMENT_QUERY_CHARS = 4000
 MAX_ASSESSMENT_STYLE_CHARS = 750
 MAX_ATTEMPTS = 3
+# A dependant phase falls back to running without its input rather than
+# deadlocking if the phase it waits on never settles.
+PHASE_DEPENDENCY_TIMEOUT_SECONDS = 20 * 60
 PROMPT_VERSION = "2026-08-12-question-recovery-v2"
 ASSESSMENT_PROMPT_VERSION = "2026-08-17-scope-filter-v1"
 VALIDATOR_VERSION = "2026-08-12-dynamic-years-v2"
 PHASE_ORDER = ("guide", "imp", "mcqs", "written", "cases")
+# The IMP question phases work from the verified IMP Points section, so they
+# start only once that phase has settled. Everything else still runs in
+# parallel, and the guide -- the longest phase -- is unaffected.
+PHASE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "mcqs": ("imp",),
+    "written": ("imp",),
+}
 PHASE_LABELS = {
     "guide": "Chronological Guide",
     "imp": "IMP Points",
@@ -2891,12 +2902,35 @@ def _renumber_project_answer(
     return pattern.sub(replace, answer), number
 
 
+def is_empty_sentinel(answer: str, sentinel: str) -> bool:
+    """True when an answer is the no-content sentinel, with or without a reason.
+
+    The IMP prompts now require a written reason on the line after the
+    sentinel, so an exact string comparison would treat a justified refusal as
+    a malformed section.
+    """
+    stripped = (answer or "").strip()
+    return stripped == sentinel or stripped.startswith(f"{sentinel}\n")
+
+
+def empty_sentinel_reason(answer: str, sentinel: str) -> str:
+    if not is_empty_sentinel(answer, sentinel):
+        return ""
+    return (answer or "").strip()[len(sentinel):].strip()
+
+
+def _is_any_empty_sentinel(answer: str) -> bool:
+    return any(
+        is_empty_sentinel(answer, sentinel) for sentinel in (NO_MCQS, NO_WRITTEN)
+    )
+
+
 def _usable_query_results(query_results: list[QueryResult]) -> list[QueryResult]:
     return [
         query_result
         for query_result in query_results
         if query_result.answer.strip()
-        and query_result.answer.strip() not in {NO_MCQS, NO_WRITTEN}
+        and not _is_any_empty_sentinel(query_result.answer)
     ]
 
 
@@ -3155,10 +3189,9 @@ PhaseValidator = Callable[[QueryResult], list[str]]
 def _query_response_errors(
     query_result: QueryResult, validator: PhaseValidator
 ) -> list[str]:
-    if len(query_result.answer) < 50 and query_result.answer.strip() not in {
-        NO_MCQS,
-        NO_WRITTEN,
-    }:
+    if len(query_result.answer) < 50 and not _is_any_empty_sentinel(
+        query_result.answer
+    ):
         errors = ["response is empty or too short"]
     else:
         errors = []
@@ -4074,13 +4107,80 @@ If no matching MCQ exists, return exactly {NO_MCQS}. Return section body only;
 never use # or ## headings."""
 
 
+MAX_EMPHASIS_CONTEXT_CHARS = 6_000
+
+
+def emphasis_point_count(imp_section: str) -> int:
+    """Count the individual points the IMP Points phase actually produced.
+
+    Bullets and callout lines are the unit the doctor's emphasis arrives in;
+    the five fixed #### headings are structure, not content.
+    """
+    count = 0
+    for line in (imp_section or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        body = stripped.lstrip("> ").strip()
+        if not body or body.startswith("[!"):
+            continue
+        if re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)", body):
+            count += 1
+    return count
+
+
+def _emphasis_minimum(point_count: int) -> int:
+    """How many IMP questions a section of this size should support."""
+    if point_count <= 0:
+        return 0
+    return max(3, min(12, point_count // 6))
+
+
+def _emphasis_context(imp_section: str, sentinel: str) -> str:
+    """Render the verified IMP Points section as input for the IMP prompts.
+
+    Before this the IMP prompts asked NotebookLM to rediscover the doctor's
+    emphasis from the recording, even though the IMP Points phase had already
+    produced and validated exactly that. On the OPs run the section held 274
+    lines of emphasis and the MCQ prompt still returned the no-questions
+    sentinel.
+    """
+    point_count = emphasis_point_count(imp_section)
+    if not point_count:
+        return (
+            f"If no emphasized point supports an item, return {sentinel} on the "
+            "first line followed by one sentence naming what was missing."
+        )
+    minimum = _emphasis_minimum(point_count)
+    body = _truncate_query_fragment(imp_section, MAX_EMPHASIS_CONTEXT_CHARS)
+    return f"""The 🌟 IMP Points section for this lecture has already been verified
+against the recording. It contains {point_count} emphasized point(s). Work from
+it directly instead of rediscovering the emphasis:
+
+<imp_points>
+{body}
+</imp_points>
+
+Cover the emphasized points that can carry a question. A section this size
+should support at least {minimum} item(s); returning fewer means the emphasis
+was not used. Returning {sentinel} is only acceptable if none of the
+{point_count} points can carry one, and it must be followed on the next line by
+one sentence naming why each category failed.
+Silence is not an acceptable answer."""
+
+
 def build_imp_mcq_prompt(
-    title: str, exam_style_profile: dict[str, Any] | None = None
+    title: str,
+    exam_style_profile: dict[str, Any] | None = None,
+    imp_section: str = "",
 ) -> str:
     style_context = render_exam_style_profile(exam_style_profile or {})
+    emphasis_context = _emphasis_context(imp_section, NO_MCQS)
     return f"""Create only IMP MCQs for '{title}' from points explicitly emphasized
 in the selected lecture recording. The selected slide source may clarify wording
 but must not introduce an unspoken fact.
+
+{emphasis_context}
 
 {style_context}
 
@@ -4094,8 +4194,7 @@ For every item use ### MCQ N **[IMP]**, then **Question:**, **Options:**,
 **Correct Answer:**, and **Clinical Explanation:**. Put one
 option on each line (a., b., c., d.), ensure the correct answer starts with an existing option
 label, and use no Source field or verbatim label. Return section body only;
-never use # or ## headings. If no emphasized point supports an MCQ, return
-exactly {NO_MCQS}."""
+never use # or ## headings."""
 
 
 def build_written_prompt(
@@ -4146,12 +4245,17 @@ question exists, return exactly {NO_WRITTEN}. Return section body only; never us
 
 
 def build_imp_written_prompt(
-    title: str, exam_style_profile: dict[str, Any] | None = None
+    title: str,
+    exam_style_profile: dict[str, Any] | None = None,
+    imp_section: str = "",
 ) -> str:
     style_context = render_exam_style_profile(exam_style_profile or {})
+    emphasis_context = _emphasis_context(imp_section, NO_WRITTEN)
     return f"""Create only IMP written questions for '{title}' from points explicitly
 emphasized in the selected lecture recording. The slide source may clarify
 wording but must not introduce an unspoken fact.
+
+{emphasis_context}
 
 {style_context}
 
@@ -4169,8 +4273,7 @@ Model Answer must be in English only and strictly ULTRA-CONCISE keywords or shor
 - For Compare: a compact Markdown table with concise keywords.
 - NEVER write long full-sentence explanations or paragraphs inside Model Answer.
 Clinical Explanation must be in Egyptian Arabic explaining the clinical reasoning and exam pearls.
-Return section body only; never use # or ## headings. If no emphasized point supports a written question, return
-exactly {NO_WRITTEN}."""
+Return section body only; never use # or ## headings."""
 
 
 def build_case_prompt(
@@ -5302,7 +5405,7 @@ def validate_mcqs(
     query_result: QueryResult,
     evidence: QuestionEvidence,
 ) -> list[str]:
-    if query_result.answer.strip() == NO_MCQS:
+    if is_empty_sentinel(query_result.answer, NO_MCQS):
         return []
     answer = query_result.answer
     errors = _body_heading_errors(answer)
@@ -5414,7 +5517,7 @@ def validate_written(
     query_result: QueryResult,
     evidence: QuestionEvidence,
 ) -> list[str]:
-    if query_result.answer.strip() == NO_WRITTEN:
+    if is_empty_sentinel(query_result.answer, NO_WRITTEN):
         return []
     answer = query_result.answer
     errors = _body_heading_errors(answer)
@@ -5616,7 +5719,18 @@ def clean_notebooklm_phrases(text: str) -> str:
 
 
 def _replace_empty_sentinel(text: str, sentinel: str, message: str) -> str:
-    return f"> [!NOTE]\n> {message}" if text.strip() == sentinel else text
+    """Turn the no-content sentinel into a reader-facing note.
+
+    A reason supplied by the model is kept so the reader -- and the next run --
+    can see why the section is empty instead of guessing.
+    """
+    if not is_empty_sentinel(text, sentinel):
+        return text
+    reason = empty_sentinel_reason(text, sentinel)
+    note = f"> [!NOTE]\n> {message}"
+    if reason:
+        note += "\n>\n> " + reason.replace("\n", "\n> ")
+    return note
 
 
 def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
@@ -5630,9 +5744,13 @@ def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
             sections.cases,
         )
     ]
-    if cleaned_sections[2].strip() and cleaned_sections[2].strip() != NO_MCQS:
+    if cleaned_sections[2].strip() and not is_empty_sentinel(
+        cleaned_sections[2], NO_MCQS
+    ):
         cleaned_sections[2] = deduplicate_question_section(cleaned_sections[2], "MCQ")
-    if cleaned_sections[3].strip() and cleaned_sections[3].strip() != NO_WRITTEN:
+    if cleaned_sections[3].strip() and not is_empty_sentinel(
+        cleaned_sections[3], NO_WRITTEN
+    ):
         cleaned_sections[3] = deduplicate_question_section(cleaned_sections[3], "Question")
     if cleaned_sections[4].strip():
         cleaned_cases = []
@@ -6370,7 +6488,7 @@ def _run_mcq_query(
     )
 
 
-def _query_mcqs(context: PipelineContext) -> QueryResult:
+def _query_mcqs(context: PipelineContext, imp_section: str = "") -> QueryResult:
     print("   - [3/5] Running MCQs...")
     query_results: list[QueryResult] = []
     if context.assessment_source_scope.source_ids:
@@ -6390,7 +6508,7 @@ def _query_mcqs(context: PipelineContext) -> QueryResult:
         _run_mcq_query(
             context,
             build_imp_mcq_prompt(
-                context.identity.title, context.exam_style_profile
+                context.identity.title, context.exam_style_profile, imp_section
             ),
             context.guide_scope,
         )
@@ -6433,7 +6551,7 @@ def _run_written_query(
     )
 
 
-def _query_written(context: PipelineContext) -> QueryResult:
+def _query_written(context: PipelineContext, imp_section: str = "") -> QueryResult:
     print("   - [4/5] Running Written Questions...")
     query_results: list[QueryResult] = []
     if context.assessment_source_scope.source_ids:
@@ -6453,7 +6571,7 @@ def _query_written(context: PipelineContext) -> QueryResult:
         _run_written_query(
             context,
             build_imp_written_prompt(
-                context.identity.title, context.exam_style_profile
+                context.identity.title, context.exam_style_profile, imp_section
             ),
             context.guide_scope,
         )
@@ -6932,12 +7050,16 @@ def _apply_agent_recovery(request: RunRequest, context: PipelineContext) -> None
     print(f"[Recovery] Agent repair accepted for {PHASE_LABELS[phase]}")
 
 
-def _phase_query_functions(context: PipelineContext) -> dict[str, Callable[[], QueryResult]]:
+def _phase_query_functions(
+    context: PipelineContext,
+    imp_section: Callable[[], str] | None = None,
+) -> dict[str, Callable[[], QueryResult]]:
+    emphasis = imp_section or (lambda: "")
     return {
         "guide": lambda: _query_guide(context),
         "imp": lambda: _query_imp(context),
-        "mcqs": lambda: _query_mcqs(context),
-        "written": lambda: _query_written(context),
+        "mcqs": lambda: _query_mcqs(context, emphasis()),
+        "written": lambda: _query_written(context, emphasis()),
         "cases": lambda: _query_cases(context),
     }
 
@@ -7082,16 +7204,43 @@ def _run_checkpointed_phases(
 
     if pending_phases:
         checkpoint_lock = threading.Lock()
+        results_lock = threading.Lock()
+        # A phase whose result is already known -- reused from a checkpoint or
+        # not scheduled at all -- must never make a dependant wait.
+        phase_ready = {phase: threading.Event() for phase in PHASE_ORDER}
+        for phase in PHASE_ORDER:
+            if phase not in pending_phases:
+                phase_ready[phase].set()
+
+        def _phase_answer(phase: str) -> str:
+            with results_lock:
+                return results.get(phase, "")
+
+        def _await_dependencies(phase: str) -> None:
+            for dependency in PHASE_DEPENDENCIES.get(phase, ()):
+                if phase_ready[dependency].is_set():
+                    continue
+                print(
+                    f"   - {PHASE_LABELS[phase]} waiting for "
+                    f"{PHASE_LABELS[dependency]}..."
+                )
+                phase_ready[dependency].wait(PHASE_DEPENDENCY_TIMEOUT_SECONDS)
 
         def _execute_phase_worker(phase: str) -> tuple[str, str | None, Exception | None]:
             nonlocal context
-            query_func = _phase_query_functions(context)[phase]
+            _await_dependencies(phase)
+            query_func = _phase_query_functions(
+                context, lambda: _phase_answer("imp")
+            )[phase]
             replacement_rounds = 0
             while True:
                 try:
                     query_result = _run_phase_query(
                         phase, query_func, run_dir, checkpoint, checkpoint_lock
                     )
+                    with results_lock:
+                        results[phase] = query_result.answer
+                    phase_ready[phase].set()
                     return phase, query_result.answer, None
                 except PhaseValidationError as error:
                     if (
@@ -7114,7 +7263,9 @@ def _run_checkpointed_phases(
                                     checkpoint,
                                     phase,
                                 )
-                                query_func = _phase_query_functions(context)[phase]
+                                query_func = _phase_query_functions(
+                                    context, lambda: _phase_answer("imp")
+                                )[phase]
                             continue
                         except (TranscriberError, OSError) as recovery_error:
                             error = PhaseValidationError(
@@ -7127,11 +7278,13 @@ def _run_checkpointed_phases(
                     _record_phase_failure(
                         phase, error, run_dir, checkpoint, checkpoint_lock
                     )
+                    phase_ready[phase].set()
                     return phase, None, error
                 except Exception as error:
                     _record_phase_failure(
                         phase, error, run_dir, checkpoint, checkpoint_lock
                     )
+                    phase_ready[phase].set()
                     return phase, None, error
 
         max_workers = min(len(pending_phases), 5)
@@ -7147,7 +7300,8 @@ def _run_checkpointed_phases(
                     if not first_error:
                         first_error = error
                 elif answer is not None:
-                    results[phase] = answer
+                    with results_lock:
+                        results[phase] = answer
 
         if first_error:
             raise first_error
@@ -7162,6 +7316,45 @@ def _run_checkpointed_phases(
         written=results["written"],
         cases=results["cases"],
     )
+
+
+def report_question_coverage(
+    sources_root: str, sections: GeneratedSections, block: bool = False
+) -> list[str]:
+    """Compare what was extracted against what the exam papers actually hold.
+
+    This is an upper-bound measure -- extraction is scoped to one lecture's
+    topics, so a low ratio means "look at this", not "this is broken".  It
+    warns by default; ``question_coverage_blocks`` in config.json turns it
+    into a hard failure.
+    """
+    questions_dir = Path(sources_root) / "Questions"
+    if not questions_dir.is_dir():
+        return []
+    transcript = f"{sections.mcqs}\n\n{sections.written}"
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".md", encoding="utf-8", delete=False
+    ) as handle:
+        handle.write(transcript)
+        transcript_path = Path(handle.name)
+    try:
+        report = build_question_coverage_report(questions_dir, transcript_path)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"[!] Question coverage could not be measured: {error}")
+        return []
+    finally:
+        transcript_path.unlink(missing_ok=True)
+    print(
+        f"[Coverage] MCQs {report.extracted_mcqs}/{report.available_mcqs} "
+        f"({report.mcq_coverage:.0%}); written {report.extracted_written}/"
+        f"{report.available_written} ({report.written_coverage:.0%})"
+    )
+    warnings = report.below_floor
+    for message in warnings:
+        print(f"[!] {message}")
+    if warnings and block:
+        raise ValidationError("; ".join(warnings))
+    return warnings
 
 
 def _save_transcript(request: TranscriptSaveRequest) -> None:
@@ -7196,6 +7389,11 @@ def _run_pipeline(config: dict[str, Any], request: RunRequest) -> int:
     if request.recovery_response:
         _apply_agent_recovery(request, context)
     sections = _run_checkpointed_phases(request, context)
+    report_question_coverage(
+        request.sources_root,
+        sections,
+        bool(config.get("question_coverage_blocks", False)),
+    )
     if request.draft_only:
         _save_draft(
             assemble_document(identity, sections),

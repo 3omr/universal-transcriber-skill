@@ -2037,7 +2037,7 @@ class TranscriberTests(unittest.TestCase):
             )
             mcq_calls = 0
 
-            def query_mcqs(_context):
+            def query_mcqs(_context, _imp_section=""):
                 nonlocal mcq_calls
                 mcq_calls += 1
                 if mcq_calls == 1:
@@ -2757,6 +2757,100 @@ class PhaseAttemptReportingTests(unittest.TestCase):
 
         self.assertIn("MCQs failed:", str(error))
         self.assertNotIn("attempt", str(error))
+
+
+class ImpQuestionPromptTests(unittest.TestCase):
+    """The IMP prompts returned NO_MCQS despite 274 lines of IMP Points."""
+
+    IMP_SECTION = "\n".join(
+        [
+            "#### 🎯 Doctor Emphasis",
+            *[f"- Emphasised point {index}." for index in range(1, 19)],
+            "#### ⚠️ Diagnostic Traps",
+            "> [!WARNING]",
+            "> - Do not miss the muscarinic signs.",
+        ]
+    )
+
+    def test_emphasis_points_are_counted_not_headings(self) -> None:
+        self.assertEqual(engine.emphasis_point_count(self.IMP_SECTION), 19)
+
+    def test_an_empty_section_counts_nothing(self) -> None:
+        self.assertEqual(engine.emphasis_point_count(""), 0)
+        self.assertEqual(engine.emphasis_point_count("#### Only a heading"), 0)
+
+    def test_the_prompt_carries_the_verified_section(self) -> None:
+        prompt = engine.build_imp_mcq_prompt("OPs", {}, self.IMP_SECTION)
+
+        self.assertIn("<imp_points>", prompt)
+        self.assertIn("Emphasised point 1.", prompt)
+        self.assertIn("19 emphasized point(s)", prompt)
+
+    def test_the_prompt_asks_for_a_minimum_tied_to_the_section_size(self) -> None:
+        prompt = engine.build_imp_mcq_prompt("OPs", {}, self.IMP_SECTION)
+
+        self.assertIn(f"at least {engine._emphasis_minimum(19)} item(s)", prompt)
+
+    def test_the_sentinel_now_requires_a_written_reason(self) -> None:
+        for builder, sentinel in (
+            (engine.build_imp_mcq_prompt, engine.NO_MCQS),
+            (engine.build_imp_written_prompt, engine.NO_WRITTEN),
+        ):
+            prompt = builder("OPs", {}, self.IMP_SECTION)
+
+            self.assertIn(f"Returning {sentinel} is only acceptable", prompt)
+            self.assertIn("Silence is not an acceptable answer", prompt)
+
+    def test_without_a_section_the_prompt_still_demands_a_reason(self) -> None:
+        prompt = engine.build_imp_mcq_prompt("OPs", {}, "")
+
+        self.assertNotIn("<imp_points>", prompt)
+        self.assertIn("followed by one sentence naming what was missing", prompt)
+
+    def test_the_question_phases_depend_on_the_imp_phase(self) -> None:
+        self.assertEqual(engine.PHASE_DEPENDENCIES["mcqs"], ("imp",))
+        self.assertEqual(engine.PHASE_DEPENDENCIES["written"], ("imp",))
+        self.assertNotIn("guide", engine.PHASE_DEPENDENCIES)
+
+
+class EmptySentinelTests(unittest.TestCase):
+    """A refusal now carries a reason, which must not read as malformed."""
+
+    def test_a_bare_sentinel_is_still_recognised(self) -> None:
+        self.assertTrue(engine.is_empty_sentinel(engine.NO_MCQS, engine.NO_MCQS))
+
+    def test_a_sentinel_with_a_reason_is_recognised(self) -> None:
+        answer = f"{engine.NO_MCQS}\nNone of the 19 points is testable as an MCQ."
+
+        self.assertTrue(engine.is_empty_sentinel(answer, engine.NO_MCQS))
+        self.assertEqual(
+            engine.empty_sentinel_reason(answer, engine.NO_MCQS),
+            "None of the 19 points is testable as an MCQ.",
+        )
+
+    def test_a_real_section_is_not_a_sentinel(self) -> None:
+        self.assertFalse(
+            engine.is_empty_sentinel("### MCQ 1 **[IMP]**", engine.NO_MCQS)
+        )
+
+    def test_validators_accept_a_justified_refusal(self) -> None:
+        answer = f"{engine.NO_MCQS}\nThe recording emphasised no testable point."
+
+        self.assertEqual(
+            engine.validate_mcqs(
+                engine.QueryResult(answer), engine.QuestionEvidence({}, [])
+            ),
+            [],
+        )
+
+    def test_the_reason_reaches_the_reader(self) -> None:
+        answer = f"{engine.NO_MCQS}\nNo emphasised point carries four options."
+
+        note = engine._replace_empty_sentinel(answer, engine.NO_MCQS, "لا توجد أسئلة.")
+
+        self.assertIn("> [!NOTE]", note)
+        self.assertIn("لا توجد أسئلة.", note)
+        self.assertIn("No emphasised point carries four options.", note)
 
 
 if __name__ == "__main__":
