@@ -2955,6 +2955,76 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(engine.DEFAULT_CONFIG["default_subject"], "")
 
 
+class SlicedQueryMergeTests(unittest.TestCase):
+    """A phase with more sources than the cap is queried in slices.
+
+    Each slice answers the same question about the same lecture, so the
+    narrative phases came back duplicated -- the OPs guide arrived at double
+    length with 28 of its 30 sections repeated verbatim.
+    """
+
+    GUIDE_SLICE = (
+        "### Introduction\n\nThe doctor opens with pesticide classification.\n\n"
+        "### The Miosis Trap\n\nAbsence of miosis does not exclude poisoning.\n"
+    )
+
+    def _merge(self, answers, phase_name):
+        return engine._merge_answer_bodies(
+            [engine.QueryResult(answer) for answer in answers], phase_name
+        )
+
+    def test_identical_guide_slices_collapse(self) -> None:
+        merged = self._merge([self.GUIDE_SLICE, self.GUIDE_SLICE], "Chronological Guide")
+
+        self.assertEqual(merged.count("### Introduction"), 1)
+        self.assertEqual(merged.count("### The Miosis Trap"), 1)
+
+    def test_distinct_guide_sections_are_all_kept(self) -> None:
+        second = self.GUIDE_SLICE + "\n### Atropinization\n\nNo maximum dose.\n"
+
+        merged = self._merge([self.GUIDE_SLICE, second], "Chronological Guide")
+
+        for heading in ("### Introduction", "### The Miosis Trap", "### Atropinization"):
+            self.assertEqual(merged.count(heading), 1, heading)
+
+    def test_whitespace_differences_do_not_defeat_the_match(self) -> None:
+        spaced = self.GUIDE_SLICE.replace("\n\n", "\n\n\n")
+
+        merged = self._merge([self.GUIDE_SLICE, spaced], "Chronological Guide")
+
+        self.assertEqual(merged.count("### Introduction"), 1)
+
+    def test_question_phases_still_concatenate_and_renumber(self) -> None:
+        first = "### MCQ 1 **[IMP]**\n\n**Question:** One?\n"
+        second = "### MCQ 1 **[IMP]**\n\n**Question:** Two?\n"
+
+        merged = self._merge([first, second], "MCQs")
+
+        self.assertIn("### MCQ 1", merged)
+        self.assertIn("### MCQ 2", merged)
+        self.assertIn("One?", merged)
+        self.assertIn("Two?", merged)
+
+    def test_imp_sections_do_not_repeat_a_point(self) -> None:
+        answer = (
+            f"{engine.IMP_HEADINGS[0]}\n- Atropine has no maximum dose.\n"
+            f"{engine.IMP_HEADINGS[1]}\n> [!WARNING]\n> - Miosis may be absent.\n"
+            f"{engine.IMP_HEADINGS[2]}\n> [!CAUTION]\n> - Do not delay atropine.\n"
+            f"{engine.IMP_HEADINGS[3]}\n- What is the first step?\n"
+            f"{engine.IMP_HEADINGS[4]}\n- Bring your booklet.\n"
+        )
+
+        merged = self._merge([answer, answer], "IMP Points")
+
+        self.assertEqual(merged.count("Atropine has no maximum dose."), 1)
+        self.assertEqual(merged.count("Miosis may be absent."), 1)
+
+    def test_a_guide_with_no_headings_survives_intact(self) -> None:
+        merged = self._merge(["Plain prose with no headings."], "Chronological Guide")
+
+        self.assertEqual(merged, "Plain prose with no headings.")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -2411,7 +2411,9 @@ def _merge_imp_answers(answers: list[str]) -> str:
     if not any(sections.values()):
         return "\n\n".join(answer.strip() for answer in answers if answer.strip())
     return "\n\n".join(
-        heading + "\n" + ("\n\n".join(sections[heading]) or "None explicitly stated")
+        heading
+        + "\n"
+        + ("\n\n".join(_unique_strings(sections[heading])) or "None explicitly stated")
         for heading in IMP_HEADINGS
     )
 
@@ -2507,6 +2509,34 @@ def _query_source_quarantine(
     return tuple(unique.values())
 
 
+PROSE_PHASES = frozenset({"Chronological Guide"})
+
+
+def deduplicate_prose_blocks(text: str) -> str:
+    """Drop repeated ### blocks produced by querying one phase in slices.
+
+    NotebookLM caps how many source IDs one request may carry, so a phase with
+    more sources than the cap is sent as several sliced queries and the answers
+    are concatenated. For the question phases that is what we want -- each
+    slice finds different questions. For narrative prose it is not: every slice
+    returns the same walkthrough of the same lecture, so the guide arrived at
+    exactly double length with all 28 of its sections repeated verbatim.
+    """
+    blocks = re.split(r"(?m)^(?=#{3,6} )", text)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+        key = re.sub(r"\s+", " ", stripped)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(stripped)
+    return "\n\n".join(kept)
+
+
 def _merge_answer_bodies(query_results: list[QueryResult], phase_name: str) -> str:
     if phase_name == "IMP Points":
         return _merge_imp_answers([query_result.answer for query_result in query_results])
@@ -2517,7 +2547,10 @@ def _merge_answer_bodies(query_results: list[QueryResult], phase_name: str) -> s
             query_result.answer, phase_name, next_number
         )
         answer_parts.append(numbered.strip())
-    return "\n\n".join(answer_parts)
+    merged = "\n\n".join(answer_parts)
+    if phase_name in PROSE_PHASES:
+        return deduplicate_prose_blocks(merged)
+    return merged
 
 
 def _merge_notebook_query_results(
