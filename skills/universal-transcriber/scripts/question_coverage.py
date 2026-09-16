@@ -23,6 +23,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from transcript_parser import parse_transcript
+
 # A stem is "3)" / "3-" / "3." at the start of a line.
 STEM_PATTERN = re.compile(r"^\s*(\d{1,2})\s*[).\-]\s*(?=\S)", re.MULTILINE)
 # An option label is "a)" / "a." / "(a)" / "©" style OCR damage aside.
@@ -35,8 +37,6 @@ SECTION_HEADER = re.compile(
     re.IGNORECASE,
 )
 
-EXTRACTED_MCQ = re.compile(r"^###\s+MCQ\s+\d+", re.MULTILINE)
-EXTRACTED_WRITTEN = re.compile(r"^###\s+Question\s+\d+", re.MULTILINE)
 
 # Calibrated across the twelve toxo transcripts, whose MCQ coverage against
 # the whole Questions/ folder spans 3.9% to 19.6% and whose written coverage
@@ -159,10 +159,16 @@ def count_paper(path: Path) -> PaperCount:
 
 
 def count_extracted(transcript: str) -> tuple[int, int]:
-    return (
-        len(EXTRACTED_MCQ.findall(transcript)),
-        len(EXTRACTED_WRITTEN.findall(transcript)),
-    )
+    """How many MCQs and written questions a transcript actually contains.
+
+    This used to count `### MCQ N` headings with a local regex. It now goes
+    through transcript_parser, which reads the same headings but is the one
+    place in the repository that knows what the format is. Blocks with a
+    missing field are still counted: a malformed question is an extraction
+    that happened, and hiding it here would flatter the coverage ratio.
+    """
+    parsed = parse_transcript(transcript)
+    return len(parsed.mcqs), len(parsed.written)
 
 
 def build_report(

@@ -14,6 +14,7 @@ cd "$root"
 SHARED_GROUPS=(
   "skills/universal-transcriber/scripts/version_checker.py skills/transcriber-anki/scripts/version_checker.py"
   "skills/universal-transcriber/scripts/console.py skills/transcriber-anki/scripts/console.py"
+  "skills/universal-transcriber/scripts/transcript_parser.py skills/transcriber-anki/scripts/transcript_parser.py"
 )
 
 status=0

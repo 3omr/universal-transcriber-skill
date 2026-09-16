@@ -12,6 +12,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+from transcript_parser import (
+    ParsedTranscript,
+    field_value,
+    parse_badges,
+    parse_transcript,
+)
+
 # Supported Medical Pillars
 PILLAR_CONFIG = {
     "def": {"label": "Definition & Diagnostic Criteria", "badge": "📖 Definition", "icon": "📖"},
@@ -33,10 +40,15 @@ def clean_markdown_text(text: str) -> str:
 
 
 def extract_badge(text: str) -> str | None:
-    """Extracts badges like [Past Exams - 2023], [Question Bank], [IMP]."""
-    match = re.search(r'\*\*\[(.*?)\]\*\*', text)
-    if match:
-        return match.group(1).strip()
+    """The first badge on a heading, as the card's label.
+
+    A heading can carry several -- `**[Past Exams - 2023]** **[IMP]**` -- and a
+    card shows one, so this deliberately keeps taking the first. Anything that
+    needs all of them should read ParsedMCQ.badges instead of calling this.
+    """
+    badges = parse_badges(text)
+    if badges:
+        return badges[0].label
     match_alt = re.search(r'\[(.*?)\]', text)
     if match_alt:
         return match_alt.group(1).strip()
@@ -52,65 +64,37 @@ class TranscriptConceptExtractor:
         self.sections: dict[str, str] = {}
 
     def load_and_split_sections(self) -> None:
-        """Reads the transcript and splits it into the 5 academic sections."""
-        with open(self.path, encoding="utf-8") as f:
-            self.content = f.read()
-
-        # Split by level 2 markdown headings
-        raw_sections = re.split(r'\n(?=##\s+)', self.content)
-        for sec in raw_sections:
-            sec_trimmed = sec.strip()
-            if not sec_trimmed:
-                continue
-            first_line = sec_trimmed.split("\n", 1)[0]
-            if "Chronological Guide" in first_line:
-                self.sections["guide"] = sec_trimmed
-            elif "Summary" in first_line or "Key Takeaways" in first_line:
-                self.sections["summary"] = sec_trimmed
-            elif "MCQ" in first_line or "Multiple Choice" in first_line:
-                self.sections["mcq"] = sec_trimmed
-            elif "Written Questions" in first_line:
-                self.sections["written"] = sec_trimmed
-            elif "Clinical Cases" in first_line or "Case" in first_line:
-                self.sections["cases"] = sec_trimmed
+        """Read the transcript and parse it once, through the shared parser."""
+        self.content = self.path.read_text(encoding="utf-8")
+        self.parsed: ParsedTranscript = parse_transcript(
+            self.content,
+            lecture_title=self.lecture_title,
+            path=self.path,
+            module_id=self.module_id,
+        )
+        # The historical key names this class exposes, mapped onto the parser's.
+        self.sections = {
+            legacy: self.parsed.sections[key]
+            for legacy, key in (
+                ("guide", "guide"),
+                ("summary", "imp"),
+                ("mcq", "mcqs"),
+                ("written", "written"),
+                ("cases", "cases"),
+            )
+            if key in self.parsed.sections
+        }
 
     def extract_written_cards(self) -> list[dict[str, Any]]:
         """Extracts written questions and converts model answers to structured bullets."""
         cards: list[dict[str, Any]] = []
-        written_text = self.sections.get("written", "")
-        if not written_text:
-            return cards
-
-        raw_questions = re.split(r'\n(?=###\s+)', written_text)
-        for q_block in raw_questions:
-            if not q_block.startswith("###"):
+        for question in self.parsed.written:
+            if not question.stem or not question.model_answer:
                 continue
 
-            badge = extract_badge(q_block) or "Written Exam"
-
-            # Question stem
-            q_stem_match = re.search(r'\*\*Question\s*(?:\(verbatim\))?:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', q_block, re.DOTALL)
-            if not q_stem_match:
-                continue
-            q_stem = q_stem_match.group(1).strip()
-            q_stem_clean = re.sub(r'^\d+[\.\)]\s*', '', q_stem).strip()
-
-            # Model Answer
-            ans_match = re.search(r'\*\*Model Answer:\*\*\s*(.+?)(?=\n\*\*Clinical|\n---|\Z)', q_block, re.DOTALL)
-            if not ans_match:
-                continue
-            ans_raw = ans_match.group(1).strip()
-
-            bullets = []
-            for line in ans_raw.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                line = re.sub(r'^(?:[-*•]|\d+[\.\-\)])\s*', '', line)
-                if line:
-                    bullets.append(line)
-
-            category = self._classify_category(q_stem_clean, bullets)
+            badge = question.badges[0].label if question.badges else "Written Exam"
+            bullets = list(question.model_answer)
+            category = self._classify_category(question.stem, bullets)
             card_id = f"{self.module_id[:4].upper()}-WRT-{len(cards)+1:02d}"
 
             cards.append({
@@ -118,7 +102,7 @@ class TranscriptConceptExtractor:
                 "category": category,
                 "category_label": PILLAR_CONFIG[category]["label"],
                 "badge": badge,
-                "front": q_stem_clean,
+                "front": question.stem,
                 "back_bullets": bullets,
                 "source_section": "Written Questions",
                 "lecture": self.lecture_title,
@@ -130,38 +114,16 @@ class TranscriptConceptExtractor:
     def extract_mcq_cards(self) -> list[dict[str, Any]]:
         """Extracts MCQs and transforms them into active-recall flashcards with option breakdown."""
         cards: list[dict[str, Any]] = []
-        mcq_text = self.sections.get("mcq", "")
-        if not mcq_text:
-            return cards
-
-        raw_mcqs = re.split(r'\n(?=###\s+)', mcq_text)
-        for block in raw_mcqs:
-            if not block.startswith("###"):
+        for mcq in self.parsed.mcqs:
+            if not mcq.stem or not mcq.correct_answer:
                 continue
 
-            badge = extract_badge(block) or "Past Exam MCQ"
+            badge = mcq.badges[0].label if mcq.badges else "Past Exam MCQ"
+            options_text = field_value(mcq.raw, "Options")
+            front_text = f"{mcq.stem}\n\n{options_text}" if options_text else mcq.stem
+            bullets = [f"**Correct Answer:** {mcq.correct_answer}"]
 
-            # Question stem
-            q_match = re.search(r'\*\*Question\s*(?:\(verbatim\))?:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', block, re.DOTALL)
-            if not q_match:
-                continue
-            q_stem = q_match.group(1).strip()
-            q_stem_clean = re.sub(r'^\d+[\.\)]\s*', '', q_stem).strip()
-
-            # Options
-            options_match = re.search(r'\*\*Options\s*(?:\(verbatim\))?:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', block, re.DOTALL)
-            options_text = options_match.group(1).strip() if options_match else ""
-
-            # Correct Answer
-            ans_match = re.search(r'\*\*Correct Answer:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', block, re.DOTALL)
-            if not ans_match:
-                continue
-            correct_ans = ans_match.group(1).strip()
-
-            front_text = f"{q_stem_clean}\n\n{options_text}" if options_text else q_stem_clean
-            bullets = [f"**Correct Answer:** {correct_ans}"]
-
-            category = self._classify_category(q_stem_clean, [correct_ans])
+            category = self._classify_category(mcq.stem, [mcq.correct_answer])
             card_id = f"{self.module_id[:4].upper()}-MCQ-{len(cards)+1:02d}"
 
             cards.append({
@@ -181,38 +143,19 @@ class TranscriptConceptExtractor:
     def extract_case_cards(self) -> list[dict[str, Any]]:
         """Extracts Clinical Cases into stepwise diagnostic & management cards."""
         cards: list[dict[str, Any]] = []
-        cases_text = self.sections.get("cases", "")
-        if not cases_text:
-            return cards
-
-        raw_cases = re.split(r'\n(?=###\s+)', cases_text)
-        for block in raw_cases:
-            if not block.startswith("###"):
+        for case in self.parsed.cases:
+            if not case.model_answer:
                 continue
 
-            badge = extract_badge(block) or "Clinical Case"
+            badge = case.badges[0].label if case.badges else "Clinical Case"
+            questions = "\n".join(case.questions)
+            bullets = list(case.model_answer)
 
-            # Scenario
-            scen_match = re.search(r'\*\*Scenario:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)', block, re.DOTALL)
-            scenario = scen_match.group(1).strip() if scen_match else ""
-
-            # Questions
-            q_match = re.search(r'\*\*Questions:\*\*\s*(.+?)(?=\n\*\*Model|\n---|\Z)', block, re.DOTALL)
-            questions = q_match.group(1).strip() if q_match else ""
-
-            # Model Answer
-            ans_match = re.search(r'\*\*Model Answer:\*\*\s*(.+?)(?=\n\*\*Clinical|\n---|\Z)', block, re.DOTALL)
-            if not ans_match:
-                continue
-            ans_raw = ans_match.group(1).strip()
-
-            bullets = []
-            for line in ans_raw.split("\n"):
-                line = line.strip()
-                if line:
-                    bullets.append(line)
-
-            front_text = f"**Clinical Scenario:**\n{scenario}\n\n**Questions:**\n{questions}" if scenario else questions
+            front_text = (
+                f"**Clinical Scenario:**\n{case.scenario}\n\n**Questions:**\n{questions}"
+                if case.scenario
+                else questions
+            )
             card_id = f"{self.module_id[:4].upper()}-CAS-{len(cards)+1:02d}"
 
             cards.append({
