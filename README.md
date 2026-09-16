@@ -39,6 +39,27 @@ python3 skills/universal-transcriber/scripts/run_transcription.py --doctor
 
 Python 3.10 or newer is required.
 
+### Configuration
+
+The engine reads `config.json` next to the scripts. Start from the example:
+
+```bash
+cp skills/universal-transcriber/scripts/config.example.json skills/universal-transcriber/scripts/config.json
+```
+
+Everything in it is optional — the defaults work — but this is where an `nlm`
+profile, a non-default `nlm` path, and the modules/transcripts roots live. If
+the file exists but is not valid JSON the run says so and continues on
+defaults rather than ignoring it quietly.
+
+| Key | Effect |
+| --- | --- |
+| `nlm_executable` / `nlm_profile` | Which `nlm` binary and auth profile every query uses |
+| `modules_root` / `transcripts_root` | Where modules and their transcripts live |
+| `default_subject` | Subject name when the engine is run directly instead of through the launcher |
+| `emoji_by_subject` | Emoji appended to each transcript filename |
+| `question_coverage_blocks` | `true` makes a below-floor question yield fail the run instead of warning |
+
 ---
 
 ## ⚡ Quick Install (تثبيت السكيل)

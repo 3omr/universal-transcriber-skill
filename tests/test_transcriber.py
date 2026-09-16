@@ -1,5 +1,6 @@
 import importlib.util
 import inspect
+import io
 import json
 import multiprocessing
 import os
@@ -2851,6 +2852,107 @@ class EmptySentinelTests(unittest.TestCase):
         self.assertIn("> [!NOTE]", note)
         self.assertIn("لا توجد أسئلة.", note)
         self.assertIn("No emphasised point carries four options.", note)
+
+
+class UnclassifiedQuestionSourceTests(unittest.TestCase):
+    """A whole run used to fail because three files were left unclassified."""
+
+    def _scan(self, names, assessment_sources):
+        with tempfile.TemporaryDirectory() as root:
+            questions = Path(root) / "Questions"
+            questions.mkdir()
+            for name in names:
+                (questions / name).write_bytes(b"%PDF-1.4")
+            with patch.object(engine, "verify_document_text"):
+                return engine.scan_local_sources(
+                    root,
+                    assessment_sources,
+                    require_assessment_manifest=True,
+                )
+
+    def test_a_yearless_file_defaults_to_question_bank(self) -> None:
+        sources = self._scan(
+            ["Khalsa questions of toxo.pdf"],
+            [{"path": "Questions/Khalsa questions of toxo.pdf", "type": "question_bank"}],
+        )
+        unclassified = self._scan(
+            ["Khalsa questions of toxo.pdf", "Random bank.pdf"],
+            [{"path": "Questions/Khalsa questions of toxo.pdf", "type": "question_bank"}],
+        )
+
+        self.assertEqual(len(sources), 1)
+        roles = {source.name: source.role for source in unclassified}
+        self.assertEqual(roles["Random bank.pdf"], "question_bank")
+
+    def test_a_defaulted_file_claims_no_exam_year(self) -> None:
+        sources = self._scan(
+            ["Random bank.pdf"],
+            [{"path": "Questions/Random bank.pdf", "type": "question_bank"}],
+        )
+        defaulted = self._scan(
+            ["Random bank.pdf", "Khalsa questions.pdf"],
+            [{"path": "Questions/Khalsa questions.pdf", "type": "question_bank"}],
+        )
+        defaulted = [s for s in defaulted if s.name == "Random bank.pdf"]
+
+        self.assertEqual(sources[0].years, ())
+        self.assertEqual(defaulted[0].years, ())
+
+    def test_a_year_bearing_file_is_still_a_hard_stop(self) -> None:
+        with self.assertRaises(engine.Phase0Error) as caught:
+            self._scan(
+                ["End 2022.pdf", "Khalsa questions.pdf"],
+                [{"path": "Questions/Khalsa questions.pdf", "type": "question_bank"}],
+            )
+
+        self.assertIn("year-bearing", str(caught.exception))
+        self.assertIn("end 2022.pdf", str(caught.exception).casefold())
+
+    def test_two_digit_years_count_as_year_bearing(self) -> None:
+        self.assertTrue(engine._path_claims_a_year("questions/Final 21.pdf"))
+        self.assertTrue(engine._path_claims_a_year("questions/End 2025.pdf"))
+        self.assertFalse(engine._path_claims_a_year("questions/Khalsa questions.pdf"))
+
+
+class LoadConfigTests(unittest.TestCase):
+    """A trailing comma used to silently discard the whole config file."""
+
+    def _load(self, contents: str | None):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "config.json"
+            if contents is not None:
+                path.write_text(contents, encoding="utf-8")
+            with patch.object(engine, "CONFIG_PATH", str(path)):
+                return engine.load_config()
+
+    def test_a_missing_file_yields_the_defaults(self) -> None:
+        self.assertEqual(self._load(None), engine.DEFAULT_CONFIG)
+
+    def test_a_valid_file_is_merged_over_the_defaults(self) -> None:
+        config = self._load('{"nlm_profile": "work"}')
+
+        self.assertEqual(config["nlm_profile"], "work")
+        self.assertEqual(config["modules_root"], "modules")
+
+    def test_broken_json_warns_instead_of_passing_silently(self) -> None:
+        stderr = io.StringIO()
+        with patch.object(sys, "stderr", stderr):
+            config = self._load('{"nlm_profile": "work",}')
+
+        self.assertIn("not valid JSON", stderr.getvalue())
+        self.assertIn("being ignored", stderr.getvalue())
+        self.assertEqual(config, engine.DEFAULT_CONFIG)
+
+    def test_a_non_object_payload_warns(self) -> None:
+        stderr = io.StringIO()
+        with patch.object(sys, "stderr", stderr):
+            config = self._load("[1, 2, 3]")
+
+        self.assertIn("must contain a JSON object", stderr.getvalue())
+        self.assertEqual(config, engine.DEFAULT_CONFIG)
+
+    def test_no_subject_is_hardcoded(self) -> None:
+        self.assertEqual(engine.DEFAULT_CONFIG["default_subject"], "")
 
 
 if __name__ == "__main__":

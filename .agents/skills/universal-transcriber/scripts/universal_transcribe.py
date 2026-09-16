@@ -590,24 +590,52 @@ def _configure_line_buffering() -> None:
             reconfigure(line_buffering=True)
 
 
+DEFAULT_CONFIG: dict[str, Any] = {
+    # The tool is subject-agnostic; the module supplies the real subject.
+    "default_subject": "",
+    "notebook_ids": {},
+    "nlm_executable": "nlm",
+    "nlm_profile": None,
+    "modules_root": "modules",
+    "transcripts_root": "Transcripts",
+    "emoji_by_subject": {},
+}
+
+
 def load_config() -> dict[str, Any]:
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-                loaded_config = json.load(config_file)
-            if isinstance(loaded_config, dict):
-                return loaded_config
-        except (OSError, json.JSONDecodeError):
-            pass
-    return {
-        "default_subject": "Toxicology",
-        "notebook_ids": {},
-        "nlm_executable": "nlm",
-        "nlm_profile": None,
-        "modules_root": "modules",
-        "transcripts_root": "Transcripts",
-        "emoji_by_subject": {},
-    }
+    """Read config.json, saying so loudly when it exists but cannot be used.
+
+    A trailing comma used to be swallowed silently and the run continued on
+    defaults, so a user who had configured an nlm profile or a modules root
+    never learned their file was ignored.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            loaded_config = json.load(config_file)
+    except json.JSONDecodeError as error:
+        print(
+            f"[!] {CONFIG_PATH} is not valid JSON ({error}); falling back to "
+            "defaults. Every setting in that file is being ignored.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_CONFIG)
+    except OSError as error:
+        print(
+            f"[!] {CONFIG_PATH} could not be read ({error}); falling back to "
+            "defaults.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_CONFIG)
+    if not isinstance(loaded_config, dict):
+        print(
+            f"[!] {CONFIG_PATH} must contain a JSON object, not "
+            f"{type(loaded_config).__name__}; falling back to defaults.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_CONFIG)
+    return {**DEFAULT_CONFIG, **loaded_config}
 
 
 def get_project_dir() -> str:
@@ -1219,11 +1247,29 @@ def scan_local_sources(
         if normalize_relative_source_path(source.relative_path)
         not in classified_question_paths
     )
-    if unclassified_question_paths:
+    ambiguous_paths = [
+        path for path in unclassified_question_paths if _path_claims_a_year(path)
+    ]
+    if ambiguous_paths:
+        # A filename carrying a year would become a **[Past Exams - YYYY]**
+        # badge. Guessing that is fabricating provenance, so it stays a hard
+        # stop -- but only for these, not for every unclassified file.
         raise Phase0Error(
-            "Assessment manifest does not classify: "
-            + ", ".join(unclassified_question_paths)
+            "Assessment manifest must classify these year-bearing source(s) so "
+            "their exam years are verified: " + ", ".join(ambiguous_paths)
         )
+    default_question_bank_paths = [
+        path for path in unclassified_question_paths if path not in set(ambiguous_paths)
+    ]
+    if default_question_bank_paths:
+        print(
+            "[!] Assessment manifest did not classify "
+            f"{len(default_question_bank_paths)} file(s) under Questions/; "
+            "treating them as question_bank (no exam year claimed): "
+            + ", ".join(default_question_bank_paths)
+        )
+        for path in default_question_bank_paths:
+            classifications[path] = ("question_bank", ())
     for source in local_sources:
         classification = classifications.get(
             normalize_relative_source_path(source.relative_path)
@@ -1232,6 +1278,17 @@ def scan_local_sources(
             source.role, source.years = classification
             source.years_verified_by_manifest = True
     return local_sources
+
+
+def _path_claims_a_year(path: str) -> bool:
+    """True when a filename would imply an exam year if left unclassified."""
+    name = os.path.basename(path)
+    if re.search(r"(?:^|\D)(20[12]\d)(?:\D|$)", name):
+        return True
+    for match in re.findall(r"(?:^|\D)([12]\d)(?:\D|$)", name):
+        if 18 <= int(match) <= 30:
+            return True
+    return False
 
 
 def _garbage_ratio(text: str) -> float:
@@ -6118,8 +6175,13 @@ def _argument_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Universal Subject Transcriber Engine")
     parser.add_argument(
         "--subject",
-        default=config.get("default_subject", "Toxicology"),
-        help="Subject/Course name",
+        default=config.get("default_subject") or "",
+        required=not (config.get("default_subject") or ""),
+        help=(
+            "Subject/Course name. The launcher supplies the module's display "
+            "name; set default_subject in config.json to run the engine "
+            "directly without it."
+        ),
     )
     parser.add_argument(
         "--agent-reviewed",

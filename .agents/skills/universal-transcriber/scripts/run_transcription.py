@@ -103,20 +103,31 @@ class LauncherContext:
         return self.notebooks[0]
 
 
+# .agents/skills is a generated mirror of skills/ (scripts/sync-agents-mirror.sh).
+# Running the mirror instead of the source means edits appear to do nothing.
+GENERATED_TREE_PARTS = frozenset({".git", ".agents", "__pycache__"})
+
+
 def _engine_path(workspace: Path) -> Path:
     local_engine = Path(__file__).resolve().parent / "universal_transcribe.py"
     if local_engine.is_file():
         return local_engine
-    preferred = workspace / "universal_transcriber" / "universal_transcribe.py"
-    if preferred.is_file():
-        return preferred
-    matches = [
+    matches = sorted(
         path
         for path in workspace.rglob("universal_transcribe.py")
-        if ".git" not in path.parts
-    ]
+        if not GENERATED_TREE_PARTS.intersection(path.parts)
+    )
     if not matches:
-        raise LauncherError("Could not find universal_transcribe.py")
+        raise LauncherError(
+            f"Could not find universal_transcribe.py under {workspace}"
+        )
+    if len(matches) > 1:
+        print(
+            "[!] Several engine copies found; using "
+            f"{matches[0]}. Others: "
+            + ", ".join(str(path) for path in matches[1:]),
+            file=sys.stderr,
+        )
     return matches[0]
 
 
@@ -604,7 +615,18 @@ TOPIC_SYNONYMS: dict[str, str] = {
 }
 
 
-def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
+def _warn_remote_discovery(reason: str) -> None:
+    print(
+        f"[!] --auto-manifest remote discovery failed ({reason}); the manifest "
+        "may be missing sources. Check `nlm auth` and the notebook id.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def generate_auto_manifest(
+    module_root: Path, lecture_query: str, nlm_executable: str = "nlm"
+) -> Path:
     lecture_dir = module_root / "Lecture"
     questions_dir = module_root / "Questions"
     query_clean = lecture_query.strip()
@@ -678,8 +700,24 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
             if score_match(audio.name) > 0:
                 matched_audio.append(audio.name)
 
-    if not matched_audio:
-        matched_audio = [f"{query_stem}.mp3"]
+    if not matched_audio and len(audio_files) == 1:
+        # One recording in Lecture/ is unambiguous whatever it is called. This
+        # is the Arabic case: "مبيد حشرى.m4a" shares no token with "OPs", so
+        # scoring can never match it.
+        matched_audio = [audio_files[0].name]
+        print(
+            f"[Launcher] No name match for '{query_clean}'; using the only "
+            f"recording in Lecture/: {audio_files[0].name}"
+        )
+    elif not matched_audio and audio_files:
+        candidates = "\n".join(f"  - {audio.name}" for audio in sorted(
+            audio_files, key=lambda path: path.name
+        ))
+        raise LauncherError(
+            f"--auto-manifest could not match a recording for '{query_clean}'.\n"
+            f"Lecture/ holds {len(audio_files)} recordings:\n{candidates}\n"
+            "Rerun with the exact filename, or write the manifest by hand."
+        )
 
     slide_path = f"Lecture/{best_slide.name}" if best_slide else f"Lecture/{query_stem}.pdf"
 
@@ -712,7 +750,7 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
     slides_action = "auto"
     module_json_path = module_root / "module.json"
     if (not assessment_sources or not audio_files or not slide_files) and module_json_path.is_file():
-        try:
+        try:  # noqa: PLR1702 - remote discovery is one cohesive best-effort block
             with open(module_json_path, "r", encoding="utf-8") as f:
                 mod_meta = json.load(f)
             notebooks = mod_meta.get("notebooks") or []
@@ -722,7 +760,7 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
             if notebooks:
                 nb_id = str(notebooks[0].get("id"))
                 nb_profile = mod_meta.get("notebook_profile")
-                nlm_cmd = ["nlm", "source", "list", nb_id, "--json"]
+                nlm_cmd = [nlm_executable, "source", "list", nb_id, "--json"]
                 if nb_profile:
                     nlm_cmd.extend(["--profile", str(nb_profile)])
                 proc = subprocess.run(nlm_cmd, capture_output=True, text=True, timeout=30)
@@ -777,8 +815,16 @@ def generate_auto_manifest(module_root: Path, lecture_query: str) -> Path:
                                 if score_match(r_title) > 0 or (is_book and not best_slide):
                                     slide_path = f"Lecture/{r_title}" if not r_title.startswith("Lecture/") else r_title
                                     slides_action = "use_remote"
-        except Exception:
-            pass
+                else:
+                    _warn_remote_discovery(
+                        f"nlm source list exited {proc.returncode}: "
+                        f"{(proc.stderr or proc.stdout).strip()[:200]}"
+                    )
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            # Remote discovery is best effort, but a silent failure here left
+            # the manifest short of sources and the draft built on them
+            # without a word -- and this is the path remote-only mode uses.
+            _warn_remote_discovery(f"{type(error).__name__}: {error}")
 
     exam_style_profile = {
         "mcq": {
@@ -1082,7 +1128,11 @@ def _execute_selected(
     for i, recording in enumerate(selected, 1):
         recording_manifest = manifest
         if recording_manifest is None:
-            auto_manifest_path = generate_auto_manifest(context.module.paths.root, recording.title)
+            auto_manifest_path = generate_auto_manifest(
+                context.module.paths.root,
+                recording.title,
+                str(context.config.get("nlm_executable") or "nlm"),
+            )
             recording_manifest = _source_manifest(str(auto_manifest_path))
             print(f"\n[Batch {i}/{len(selected)}] >>> Generated Auto-Manifest for: {recording.title}")
         with _lecture_lock(context.module, recording, recording_manifest):
@@ -1221,7 +1271,11 @@ def main() -> int:
         if args.auto_manifest:
             if args.source_manifest:
                 raise LauncherError("--auto-manifest cannot be combined with --source-manifest")
-            auto_manifest_path = generate_auto_manifest(context.module.paths.root, args.auto_manifest)
+            auto_manifest_path = generate_auto_manifest(
+                context.module.paths.root,
+                args.auto_manifest,
+                str(context.config.get("nlm_executable") or "nlm"),
+            )
             args.source_manifest = str(auto_manifest_path)
             print(f"[Auto-Manifest] Generated manifest: {auto_manifest_path}")
         if args.sync_sources:
