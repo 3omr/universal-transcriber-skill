@@ -1148,6 +1148,58 @@ def _execute_selected(
     return 0
 
 
+def _figure_slide_source(args: argparse.Namespace, context: LauncherContext) -> Path:
+    """Which deck to illustrate: --slides if given, else the configured one."""
+    if args.slides:
+        candidate = Path(args.slides).expanduser()
+        if not candidate.is_absolute():
+            candidate = context.module.paths.root / candidate
+        return candidate
+    if not args.lecture:
+        raise LauncherError(
+            "--extract-figures needs --lecture (to find the configured slides) "
+            "or --slides pointing at a deck"
+        )
+    configured = configured_slide(context.module, args.lecture)
+    if configured:
+        return configured
+    raise LauncherError(
+        f"No slides configured for '{args.lecture}' in module.json; "
+        "pass --slides with the deck to illustrate"
+    )
+
+
+def _run_figure_extraction(args: argparse.Namespace, context: LauncherContext) -> int:
+    from slide_figures import (
+        DEFAULT_RESOLUTION,
+        FigureExtractionError,
+        extract_figures,
+        render_reference_markdown,
+        render_report,
+    )
+
+    source = _figure_slide_source(args, context)
+    lecture = args.lecture or source.stem
+    try:
+        figure_set = extract_figures(
+            source,
+            context.module.paths.transcripts,
+            lecture,
+            resolution=args.figure_resolution or DEFAULT_RESOLUTION,
+            include_text_pages=args.all_slide_pages,
+        )
+    except FigureExtractionError as error:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+
+    print(render_report(figure_set))
+    markdown = render_reference_markdown(figure_set)
+    if markdown:
+        print("\nPaste into the transcript where the doctor showed them:\n")
+        print(markdown)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Multi-module transcription launcher")
     parser.add_argument("--workspace", default=os.getcwd())
@@ -1186,6 +1238,30 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument(
+        "--extract-figures",
+        action="store_true",
+        help=(
+            "Render the diagram pages of this lecture's slides into "
+            "Transcripts/Figures/<lecture>/ and exit. Slides reach NotebookLM "
+            "as text, so every picture in them is lost by the time a transcript "
+            "is written; this is what puts them back"
+        ),
+    )
+    parser.add_argument(
+        "--figure-resolution",
+        type=int,
+        default=None,
+        help="DPI for --extract-figures (default 150)",
+    )
+    parser.add_argument(
+        "--all-slide-pages",
+        action="store_true",
+        help=(
+            "With --extract-figures, render every slide rather than only the "
+            "ones carrying a diagram"
+        ),
+    )
     parser.add_argument(
         "--sync-sources",
         action="store_true",
@@ -1281,6 +1357,8 @@ def main() -> int:
             _print_modules(discover_modules(workspace, args.modules_root))
             return 0
         context = _launcher_context(args)
+        if args.extract_figures:
+            return _run_figure_extraction(args, context)
         if args.auto_manifest:
             if args.source_manifest:
                 raise LauncherError("--auto-manifest cannot be combined with --source-manifest")

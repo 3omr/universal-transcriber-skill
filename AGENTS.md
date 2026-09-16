@@ -61,6 +61,7 @@ Use these exact terms. Do not paraphrase or coin synonyms.
     - Users discover updates through the latest **GitHub release tag**, not the `VERSION` file in the repo — a merge that cuts no release is invisible to anyone who installed the skill.
 13. **Preflight External Tooling**:
     - The pipeline shells out to `nlm`, poppler, `ocrmypdf`, LibreOffice, Ghostscript, and `ffmpeg`. When a run fails on a missing tool, run `run_transcription.py --doctor` and report the install hint to the user rather than guessing or working around the gap. When a run fails on a tool that *is* installed — an `nlm` call that returns nothing, an unexplained auth error — run `--doctor-live`, which executes each tool instead of just looking for it.
+    - Slides reach NotebookLM as text, so their diagrams never reach the transcript. When a lecture's slides carry figures that matter, run `run_transcription.py --extract-figures` and reference the rendered pages from the Chronological Guide at the point the doctor showed them. Never invent a figure reference: only link files that command actually produced.
 14. **Cross-Platform File Locking**:
     - Never `import fcntl` directly. Use `exclusive_file_lock` from `skills/universal-transcriber/scripts/file_lock.py`, which keeps `flock` semantics on POSIX and falls back to `msvcrt` on Windows.
 15. **The Engine Is Being Split, One Module At A Time**:
