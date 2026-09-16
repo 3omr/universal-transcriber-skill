@@ -38,6 +38,8 @@ ${BUMP_REASON:-}"
   fi
 fi
 
+headline="$(python3 scripts/next_version.py --current "$current" --title "${PR_TITLE:-}" --headline)"
+
 notes_file="$(mktemp)"
 {
   printf '%s\n\n' "${PR_BODY:-}"
@@ -49,7 +51,7 @@ notes_file="$(mktemp)"
 gh release create "$tag" \
   --target "$(git rev-parse HEAD)" \
   --latest \
-  --title "${tag}: ${PR_TITLE:-Release ${NEXT_VERSION}}" \
+  --title "${tag}: ${headline:-Release ${NEXT_VERSION}}" \
   --notes-file "$notes_file"
 
 echo "Published $tag from #${PR_NUMBER}." >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
