@@ -3025,6 +3025,52 @@ class SlicedQueryMergeTests(unittest.TestCase):
         self.assertEqual(merged, "Plain prose with no headings.")
 
 
+class NotebookLmPhraseCleanupTests(unittest.TestCase):
+    """The trailing-offer stripper had a regex Python 3.10 refuses to compile.
+
+    `\\*+` is an escaped backslash followed by two quantifiers: a "multiple
+    repeat" error on 3.10, and an accidental possessive quantifier on 3.11+
+    that silently matched backslashes instead of the markdown asterisks it was
+    written for. The whole finalize step crashed on 3.10.
+    """
+
+    def test_a_bold_trailing_offer_is_stripped(self) -> None:
+        cleaned = engine.clean_notebooklm_phrases(
+            "محتوى مفيد\n\n**أنا جاهز أساعدك في أي حاجة تانية**\nسطر باقي"
+        )
+
+        self.assertNotIn("أنا جاهز", cleaned)
+        self.assertIn("محتوى مفيد", cleaned)
+        self.assertIn("سطر باقي", cleaned)
+
+    def test_an_emoji_prefixed_offer_is_stripped(self) -> None:
+        # "👁️" is two codepoints, so a single character-class match left the
+        # variation selector behind and the rest of the pattern never matched.
+        cleaned = engine.clean_notebooklm_phrases(
+            "👁️ Would you like me to continue?\nkeep me"
+        )
+
+        self.assertEqual(cleaned.strip(), "keep me")
+
+    def test_every_offer_emoji_is_handled(self) -> None:
+        for emoji in ("👁️", "📊", "🎧", "🔍", "💡", "📝"):
+            with self.subTest(emoji=emoji):
+                cleaned = engine.clean_notebooklm_phrases(
+                    f"{emoji} Do you want a summary?\nkeep me"
+                )
+
+                self.assertEqual(cleaned.strip(), "keep me")
+
+    def test_real_content_carrying_an_emoji_survives(self) -> None:
+        cleaned = engine.clean_notebooklm_phrases("normal 👁️ text stays")
+
+        self.assertIn("normal 👁️ text stays", cleaned)
+
+    def test_the_offer_patterns_compile(self) -> None:
+        """Guards the syntax itself, which only 3.10 rejected at runtime."""
+        engine.clean_notebooklm_phrases("")
+
+
 if __name__ == "__main__":
     unittest.main()
 

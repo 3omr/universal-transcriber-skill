@@ -4921,8 +4921,8 @@ def clean_notebooklm_phrases(text: str) -> str:
         r"Internal request marker: USTE-[0-9a-f]+[^\n]*",
         r"Studio Panel",
         r"Audio Overview",
-        r"(?m)^\s*(?:[👁️📊🎧🔍💡📝]|\\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
-        r"(?m)^---\s*\n+\s*(?:[👁️📊🎧🔍💡📝]|\\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
+        r"(?m)^\s*(?:[👁️📊🎧🔍💡📝]+|\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
+        r"(?m)^---\s*\n+\s*(?:[👁️📊🎧🔍💡📝]+|\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
     )
     cleaned = text
     for pattern in patterns:
