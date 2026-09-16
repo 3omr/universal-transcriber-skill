@@ -47,6 +47,9 @@ flowchart LR
 Identify the target module and verify source synchronization:
 
 ```bash
+# Verify the external tooling first (nlm, poppler, ocrmypdf, libreoffice, ...)
+python3 skills/universal-transcriber/scripts/run_transcription.py --doctor
+
 # List available modules
 python3 skills/universal-transcriber/scripts/run_transcription.py --workspace "$PWD" --list-modules
 
@@ -91,8 +94,10 @@ python3 skills/universal-transcriber/scripts/run_transcription.py \
   --source-manifest /tmp/<lecture>-manifest.json --draft-only
 ```
 
-The draft runs sequentially through all five sections:
-`📖 Chronological Guide → ⭐ IMP Points → ❓ MCQs → 📝 Written Questions → 🏥 Clinical Cases`.
+The engine queries all five sections **concurrently** and checkpoints each one
+independently, so a phase that fails does not discard the phases that passed:
+`📖 Chronological Guide`, `⭐ IMP Points`, `❓ MCQs`, `📝 Written Questions`, `🏥 Clinical Cases`.
+The finished draft always assembles them in that order.
 
 > [!IMPORTANT]
 > **No Wasteful LLM Retries**: If a phase query returns raw text containing minor OCR artifacts (joined words, split letters) or duplicate questions from multiple exam years, **do not make repeated queries to NotebookLM**. The Agent takes the candidate response directly, repairs the OCR and merges/formats the questions with canonical badges, and applies the repaired response immediately via `--recovery-response` or direct draft editing.
