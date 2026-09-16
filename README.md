@@ -25,6 +25,10 @@ manager. Install these before your first transcription:
 | **ghostscript** | Compressing PDFs over the NotebookLM upload limit | `apt install ghostscript` / `brew install ghostscript` |
 | **ffmpeg** | Normalizing recordings NotebookLM will not accept | `apt install ffmpeg` / `brew install ffmpeg` |
 
+`pdftoppm` and `pdfimages` ship with poppler-utils and are what
+`--extract-figures` uses; LibreOffice is needed there too, to turn a PPTX into
+pages that can be rendered.
+
 Python packages (`genanki` for native `.apkg` decks, `reportlab` to render
 plain-text question banks as PDFs before upload):
 
@@ -96,6 +100,28 @@ answer is visible before anyone clicks merge.
 
 The in-app update notifier polls the latest **GitHub release tag**, which is
 why a merge that cuts no release reaches nobody who installed the skill.
+
+### Slide figures
+
+Slides reach NotebookLM as text, so every picture in them — the anatomy
+diagram, the gonioscopy view, the photo of the antidote box — is gone by the
+time a transcript is written. In ophthalmology and toxicology that is most of
+the teaching.
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module toxo --lecture "OPs" --extract-figures
+```
+
+This renders the diagram pages into `Transcripts/Figures/<lecture>/` and prints
+the markdown to paste into the transcript. A page counts as a diagram when it
+has almost no extractable text **and** actually embeds an image — the second
+test is what stops a section divider reading just "Warfarin" from being
+rendered as a blank slide with a title. On a real 76-slide deck that selects
+nine pages.
+
+Pass `--slides` to point at a specific deck, `--all-slide-pages` to render
+everything, and `--figure-resolution` to change the DPI (default 150).
 
 ### Checking a module's transcripts
 

@@ -133,6 +133,22 @@ DEPENDENCIES: tuple[Dependency, ...] = (
         probe=("-v",),
     ),
     Dependency(
+        name="poppler-utils (pdftoppm)",
+        executables=("pdftoppm",),
+        purpose="Rendering diagram slides as figures (--extract-figures)",
+        install_hint="apt install poppler-utils / brew install poppler",
+        required=False,
+        probe=("-v",),
+    ),
+    Dependency(
+        name="poppler-utils (pdfimages)",
+        executables=("pdfimages",),
+        purpose="Telling a diagram slide apart from a title-only divider",
+        install_hint="apt install poppler-utils / brew install poppler",
+        required=False,
+        probe=("-v",),
+    ),
+    Dependency(
         name="ocrmypdf",
         executables=("ocrmypdf", "pdfocr"),
         purpose="OCR for scanned past-exam PDFs that carry no text layer",
@@ -143,7 +159,7 @@ DEPENDENCIES: tuple[Dependency, ...] = (
     Dependency(
         name="libreoffice",
         executables=("libreoffice", "soffice"),
-        purpose="Converting PPTX/PPSX/DOCX slides to PDF before upload",
+        purpose="Converting PPTX/PPSX/DOCX slides to PDF, for upload and for figures",
         install_hint="apt install libreoffice / brew install --cask libreoffice",
         required=False,
         probe=("--version",),
