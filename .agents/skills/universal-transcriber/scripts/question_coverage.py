@@ -114,7 +114,7 @@ def pdf_text(path: Path) -> str:
     completed = subprocess.run(
         ["pdftotext", "-layout", str(path), "-"],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         check=False,
         timeout=120,
     )

@@ -11,6 +11,11 @@ The helpers below keep POSIX behavior identical (``fcntl.flock``) and fall back
 to ``msvcrt.locking`` elsewhere. Both raise ``AlreadyLocked`` -- a subclass of
 ``BlockingIOError``, so existing ``except BlockingIOError`` handlers still
 catch it -- when ``blocking=False`` and another process holds the lock.
+
+Being importable on Windows was never enough on its own. The engine writes
+Arabic and emoji to stdout, which a cp1252 console cannot encode, so console.py
+pins both streams to UTF-8 before anything is printed. Locking and encoding
+together are what make the Windows job in CI pass; either one alone does not.
 """
 
 from __future__ import annotations

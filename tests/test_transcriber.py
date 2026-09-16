@@ -85,7 +85,12 @@ def commit_transcript_worker(
 class TranscriberTests(unittest.TestCase):
     def test_concurrent_transcript_commits_keep_both_index_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            context = multiprocessing.get_context("fork")
+            # Not get_context("fork"): Windows has no fork at all, and
+            # macOS defaults away from it. The platform default exercises
+            # whatever start method real users will get, and spawn is the
+            # harder case -- commit_transcript_worker is defined at module
+            # scope precisely so it survives being re-imported by a child.
+            context = multiprocessing.get_context()
             workers = (
                 context.Process(
                     target=commit_transcript_worker,
@@ -1736,7 +1741,7 @@ class TranscriberTests(unittest.TestCase):
                 )
             )
 
-            saved = json.loads((run_dir / "checkpoint.json").read_text())
+            saved = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
 
         self.assertEqual(saved["source_quarantine"]["mcqs"][0]["source_id"], "bad-source")
 
@@ -1756,9 +1761,9 @@ class TranscriberTests(unittest.TestCase):
                     "mcqs", failed_query, run_dir, checkpoint
                 )
 
-            saved = json.loads((run_dir / "checkpoint.json").read_text())
+            saved = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
             recovery = json.loads(
-                (run_dir / "phase-mcqs-sources.json").read_text()
+                (run_dir / "phase-mcqs-sources.json").read_text(encoding="utf-8")
             )
 
         self.assertEqual(saved["phases"]["mcqs"], "failed")
@@ -1780,7 +1785,7 @@ class TranscriberTests(unittest.TestCase):
                     "guide", failed_query, run_dir, checkpoint
                 )
 
-            saved = json.loads((run_dir / "checkpoint.json").read_text())
+            saved = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
             self.assertTrue(
                 (run_dir / "phase-guide-recovery.md").is_file(),
                 "a phase that fails without a quarantine must still leave a "

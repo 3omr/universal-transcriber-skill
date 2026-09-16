@@ -419,7 +419,7 @@ def _sha256(path: Path) -> str:
 def _run_tool(command: list[str], timeout: int, description: str) -> None:
     try:
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=timeout, check=False
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False
         )
     except FileNotFoundError as error:
         raise PreparationError(f"Required tool for {description} was not found") from error
@@ -435,12 +435,12 @@ def _pdf_text(path: Path) -> tuple[str, str]:
         raise PreparationError("pdfinfo and pdftotext are required for PDF inspection")
     try:
         metadata = subprocess.run(
-            ["pdfinfo", str(path)], capture_output=True, text=True, timeout=60, check=False
+            ["pdfinfo", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False
         )
         extracted = subprocess.run(
             ["pdftotext", "-layout", str(path), "-"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=180,
             check=False,
         )

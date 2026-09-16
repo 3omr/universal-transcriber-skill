@@ -20,6 +20,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from console import configure_console_streams
 from file_lock import exclusive_file_lock
 from module_registry import (
     ModuleConfig,
@@ -761,7 +762,7 @@ def generate_auto_manifest(
                 nlm_cmd = [nlm_executable, "source", "list", nb_id, "--json"]
                 if nb_profile:
                     nlm_cmd.extend(["--profile", str(nb_profile)])
-                proc = subprocess.run(nlm_cmd, capture_output=True, text=True, timeout=30)
+                proc = subprocess.run(nlm_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
                 if proc.returncode == 0:
                     remote_list = json.loads(proc.stdout)
                     if isinstance(remote_list, dict):
@@ -1246,10 +1247,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure:
-            reconfigure(line_buffering=True)
+    configure_console_streams()
     args = _parser().parse_args()
     workspace_for_cache = None
     if getattr(args, "workspace", None):

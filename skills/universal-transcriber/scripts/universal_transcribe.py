@@ -23,6 +23,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from console import configure_console_streams
 from exam_years import (  # noqa: F401
     ARABIC_DIGITS,
     MIN_REASONABLE_EXAM_YEAR,
@@ -248,11 +249,10 @@ def _unique_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
-def _configure_line_buffering() -> None:
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure:
-            reconfigure(line_buffering=True)
+# Re-exported so the engine's public surface keeps both names.
+_configure_console_streams = configure_console_streams
+# The original name, kept because tests/test_engine_contract.py pins it.
+_configure_line_buffering = _configure_console_streams
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -424,7 +424,7 @@ def _run_nlm_json(
         completed = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout_seconds,
             check=False,
         )

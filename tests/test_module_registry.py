@@ -503,7 +503,7 @@ class ModuleRegistryTests(unittest.TestCase):
             self.assertTrue((module_root / "Questions").is_dir())
             self.assertTrue((module_root / "Transcripts").is_dir())
             self.assertFalse((module_root / "Exams").exists())
-            manifest = json.loads((module_root / "module.json").read_text())
+            manifest = json.loads((module_root / "module.json").read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["notebooks"], [{"id": "new-id", "title": "Cardiology"}])
 

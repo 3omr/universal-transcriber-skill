@@ -15,8 +15,11 @@ jobs:
         os: [ubuntu-latest]
         python-version: ['3.10', '3.11', '3.12']
         include:
-          # file_lock.py carries a whole msvcrt branch for Windows that has
-          # never actually been executed. One job is enough to keep it honest.
+          # Windows is a supported platform, not an aspiration. file_lock.py
+          # carries an msvcrt branch, and the engine's entire output is Arabic
+          # and emoji -- neither of which survives the cp1252 console Windows
+          # hands a Python process by default. This job is what keeps both
+          # honest.
           - os: windows-latest
             python-version: '3.12'
     steps:
@@ -34,7 +37,16 @@ jobs:
 
       - name: Install document tooling
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+        # Azure's apt mirrors drop index files often enough to redden an
+        # otherwise green run, so retry rather than fail the build on someone
+        # else's outage.
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y poppler-utils && exit 0
+            echo "apt attempt $attempt failed; retrying in 15s"
+            sleep 15
+          done
+          exit 1
 
       - name: Run unit tests
         env:

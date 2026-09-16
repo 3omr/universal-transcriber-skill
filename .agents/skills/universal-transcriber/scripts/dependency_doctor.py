@@ -83,7 +83,7 @@ class Dependency:
             completed = subprocess.run(
                 [location, *self.probe],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=self.probe_timeout,
                 check=False,
             )

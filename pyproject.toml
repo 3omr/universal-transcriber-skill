@@ -48,10 +48,11 @@ ignore = [
 [tool.mypy]
 python_version = "3.10"
 files = ["skills", "scripts", ".github/scripts"]
-# The anki copy of version_checker.py is byte-identical to the transcriber
-# one (enforced by scripts/check-shared-files.sh), and mypy cannot resolve two
-# modules with the same name. Checking one of them checks both.
-exclude = "(^\\.agents/|/__pycache__/|^skills/transcriber-anki/scripts/version_checker\\.py$)"
+# The anki copies of these modules are byte-identical to the transcriber ones
+# (enforced by scripts/check-shared-files.sh), and mypy cannot resolve two
+# modules with the same name. Checking one of each pair checks both. Keep this
+# list in step with SHARED_GROUPS in scripts/check-shared-files.sh.
+exclude = "(^\\.agents/|/__pycache__/|^skills/transcriber-anki/scripts/(version_checker|console)\\.py$)"
 # Deliberately permissive to start. The codebase is already fully annotated,
 # so the value here is catching real contradictions, not chasing strictness.
 # Tighten in its own pull request once this is green and stays green.

@@ -21,6 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from console import configure_console_streams
 from deck_exporter import DeckExporter
 from transcript_concept_extractor import TranscriptConceptExtractor
 from version_checker import __version__, print_update_notice_if_available
@@ -113,6 +114,7 @@ def process_lecture(
 
 
 def main():
+    configure_console_streams()
     parser = argparse.ArgumentParser(description="Generate high-yield English medical Anki flashcards from lecture transcripts.")
     parser.add_argument("--workspace", default=".", help="Path to repository workspace root")
     parser.add_argument("--module", required=True, help="Module ID (e.g. toxo)")

@@ -48,7 +48,14 @@ fails if one is installed but not working:
 python3 skills/universal-transcriber/scripts/run_transcription.py --doctor-live
 ```
 
-Python 3.10 or newer is required.
+Python 3.10 or newer is required. Linux, macOS and Windows are all supported
+and all covered by CI.
+
+> On Windows the console defaults to the ANSI code page, which can encode
+> neither Arabic nor emoji — that is, none of what this tool prints. The
+> entry points pin stdout and stderr to UTF-8 before writing anything, so this
+> is handled for you; it is only worth knowing if you embed the scripts
+> somewhere else.
 
 ### Configuration
 

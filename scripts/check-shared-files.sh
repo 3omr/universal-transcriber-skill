@@ -13,6 +13,7 @@ cd "$root"
 # Each entry is a space-separated group of paths that must be byte-identical.
 SHARED_GROUPS=(
   "skills/universal-transcriber/scripts/version_checker.py skills/transcriber-anki/scripts/version_checker.py"
+  "skills/universal-transcriber/scripts/console.py skills/transcriber-anki/scripts/console.py"
 )
 
 status=0
