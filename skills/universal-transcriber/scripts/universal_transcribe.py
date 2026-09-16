@@ -22,10 +22,55 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import date
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from xml.etree import ElementTree
 
+from exam_years import (  # noqa: F401
+    ARABIC_DIGITS,
+    MIN_REASONABLE_EXAM_YEAR,
+    extract_exam_years,
+    extract_filename_exam_years,
+    is_reasonable_exam_year,
+)
 from file_lock import exclusive_file_lock
+from output_assembly import (  # noqa: F401
+    _delete_review_draft,
+    _existing_target_contents,
+    _index_row,
+    _index_with_row,
+    _new_index,
+    _prepare_temp,
+    _prepared_targets,
+    _remove_prepared_files,
+    _restore_replaced_files,
+    commit_managed_transcript,
+    commit_transcript_and_index,
+    format_markdown_tables,
+    render_index_content,
+)
+from question_prompts import (  # noqa: F401
+    IMP_HEADINGS,
+    MAX_ASSESSMENT_CONTEXT_CHARS,
+    MAX_ASSESSMENT_QUERY_CHARS,
+    MAX_ASSESSMENT_STYLE_CHARS,
+    MAX_EMPHASIS_CONTEXT_CHARS,
+    NO_MCQS,
+    NO_WRITTEN,
+    _compact_assessment_context,
+    _emphasis_context,
+    _emphasis_minimum,
+    _truncate_query_fragment,
+    build_case_prompt,
+    build_guide_prompt,
+    build_imp_mcq_prompt,
+    build_imp_prompt,
+    build_imp_written_prompt,
+    build_mcq_prompt,
+    build_written_prompt,
+    emphasis_point_count,
+    render_exam_style_profile,
+)
+from question_coverage import build_report as build_question_coverage_report
 from source_preparation import (
     PreparationReport,
     PreparedSource,
@@ -49,14 +94,20 @@ MAX_SOURCE_IDS_PER_QUERY = 3
 # exam-to-bank link), which made an otherwise valid source request look like an
 # invalid source-ID request.  Keep the source list and the prompt contract
 # compact enough for the provider and leave room for a bounded repair suffix.
-MAX_ASSESSMENT_CONTEXT_CHARS = 900
-MAX_ASSESSMENT_QUERY_CHARS = 4000
-MAX_ASSESSMENT_STYLE_CHARS = 750
-MAX_ATTEMPTS = 3
+# A dependant phase falls back to running without its input rather than
+# deadlocking if the phase it waits on never settles.
+PHASE_DEPENDENCY_TIMEOUT_SECONDS = 20 * 60
 PROMPT_VERSION = "2026-08-12-question-recovery-v2"
 ASSESSMENT_PROMPT_VERSION = "2026-08-17-scope-filter-v1"
 VALIDATOR_VERSION = "2026-08-12-dynamic-years-v2"
 PHASE_ORDER = ("guide", "imp", "mcqs", "written", "cases")
+# The IMP question phases work from the verified IMP Points section, so they
+# start only once that phase has settled. Everything else still runs in
+# parallel, and the guide -- the longest phase -- is unaffected.
+PHASE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "mcqs": ("imp",),
+    "written": ("imp",),
+}
 PHASE_LABELS = {
     "guide": "Chronological Guide",
     "imp": "IMP Points",
@@ -72,19 +123,12 @@ LARGE_UPLOAD_POLL_ATTEMPTS = 36
 SOURCE_DELETE_POLL_SECONDS = 2
 SOURCE_DELETE_POLL_ATTEMPTS = 15
 MAX_SOURCE_REPLACEMENT_ROUNDS = 1
-MIN_REASONABLE_EXAM_YEAR = 2000
-
-
 @contextmanager
 def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
     with exclusive_file_lock(lock_path):
         yield
 
 
-def is_reasonable_exam_year(year: int) -> bool:
-    return MIN_REASONABLE_EXAM_YEAR <= year <= date.today().year + 1
-
-ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 RECORDING_EXTENSIONS = {
     ".m4a",
     ".mp3",
@@ -109,13 +153,6 @@ NLM_UPLOAD_EXTENSIONS = (
 )
 
 ALLOWED_CALLOUTS = {"NOTE", "IMPORTANT", "WARNING", "CAUTION", "TIP"}
-IMP_HEADINGS = (
-    "#### 1. 📌 Doctor's Spoken Pearls",
-    "#### 2. ⚠️ Diagnostic Traps",
-    "#### 3. 🛑 Lethal Mistakes",
-    "#### 4. ❓ Interactive Doctor Questions",
-    "#### 5. 📋 Exam Rules",
-)
 SECTION_HEADINGS = (
     "## 📖 Chronological Guide",
     "## 🌟 IMP Points",
@@ -123,8 +160,6 @@ SECTION_HEADINGS = (
     "## ✍️ Written Questions",
     "## 🩺 Clinical Cases",
 )
-NO_MCQS = "NO_GROUNDED_MCQS"
-NO_WRITTEN = "NO_GROUNDED_WRITTEN_QUESTIONS"
 QUESTION_OPTION_KEYS = ("a", "b", "c", "d")
 EDITORIAL_REVIEW_MARKERS = (
     "NEEDS_SOURCE_REVIEW",
@@ -171,381 +206,45 @@ NOTEBOOK_CITATION_PATTERN = re.compile(
 )
 
 
-class TranscriberError(RuntimeError):
-    """Base error for failures that must not produce a transcript."""
-
-
-class Phase0Error(TranscriberError):
-    """Raised when the source audit cannot establish safe inputs."""
-
-
-class NlmError(TranscriberError):
-    """Raised when the NotebookLM CLI cannot produce a valid result."""
-
-    def __init__(
-        self,
-        message: str,
-        source_quarantine: tuple["SourceQuarantine", ...] = (),
-    ) -> None:
-        self.source_quarantine = tuple(source_quarantine)
-        super().__init__(message)
-
-
-class ValidationError(TranscriberError):
-    """Raised when generated Markdown violates its phase contract."""
-
-
-class CheckpointError(TranscriberError):
-    """Raised when a saved run cannot be safely resumed."""
-
-
-class PhaseValidationError(ValidationError):
-    """A phase failed with its last response preserved for Agent recovery."""
-
-    def __init__(
-        self,
-        phase_name: str,
-        errors: list[str],
-        answer: str = "",
-        source_names: tuple[str, ...] = (),
-        source_quarantine: tuple["SourceQuarantine", ...] = (),
-    ) -> None:
-        self.phase_name = phase_name
-        self.errors = list(errors)
-        self.answer = answer
-        self.source_names = tuple(source_names)
-        self.source_quarantine = tuple(source_quarantine)
-        super().__init__(
-            f"{phase_name} failed after {MAX_ATTEMPTS} attempts: "
-            + "; ".join(self.errors)
-        )
-
-
-@dataclass
-class OCRReport:
-    path: str
-    status: str
-    reason: str
-    page_count: int = 0
-    text_pages: int = 0
-    total_characters: int = 0
-    sparse_page_ratio: float = 0.0
-    garbage_ratio: float = 0.0
-
-
-@dataclass(frozen=True)
-class PDFMetrics:
-    page_count: int
-    text_pages: int
-    total_characters: int
-    sparse_page_ratio: float
-    garbage_ratio: float
-
-
-@dataclass
-class LocalSource:
-    path: str
-    relative_path: str
-    name: str
-    normalized_name: str
-    normalized_stem: str
-    extension: str
-    size: int
-    role: str
-    years: tuple[int, ...] = ()
-    ocr: OCRReport | None = None
-    prepared_extension: str = ""
-    original_path: str = ""
-    original_size: int = 0
-    preparation_action: str = "use"
-    preparation_status: str = "ready"
-    source_sha256: str = ""
-    prepared_sha256: str = ""
-    years_verified_by_manifest: bool = False
-
-    @property
-    def upload_extension(self) -> str:
-        return self.prepared_extension or self.extension
-
-    @property
-    def is_preparation_planned(self) -> bool:
-        return self.preparation_status == "planned"
-
-
-@dataclass(frozen=True)
-class RemoteSource:
-    source_id: str
-    title: str
-    normalized_name: str
-    normalized_stem: str
-    source_type: str = ""
-    notebook_uuid: str = ""
-    content_hash: str = ""
-    status: str = ""
-
-
-@dataclass(frozen=True)
-class NotebookTarget:
-    library_id: str
-    notebook_uuid: str
-    url: str
-    name: str
-
-
-@dataclass(frozen=True)
-class SourceQuarantine:
-    notebook_uuid: str
-    source_id: str
-    source_name: str
-    error: str
-
-
-@dataclass(frozen=True)
-class SourceReplacement:
-    notebook_uuid: str
-    old_source_id: str
-    old_source_name: str
-    local_path: str
-    new_source_id: str
-    new_source_name: str
-
-
-@dataclass
-class QueryResult:
-    answer: str
-    source_names: tuple[str, ...] = ()
-    session_id: str | None = None
-    source_quarantine: tuple[SourceQuarantine, ...] = ()
-
-
-@dataclass
-class Phase0Report:
-    notebook: NotebookTarget
-    local_sources: list[LocalSource]
-    remote_sources: list[RemoteSource]
-    notebooks: tuple[NotebookTarget, ...] = ()
-    duplicates: list[LocalSource] = field(default_factory=list)
-    ambiguous: list[LocalSource] = field(default_factory=list)
-    missing_before_upload: list[LocalSource] = field(default_factory=list)
-    unsupported: list[LocalSource] = field(default_factory=list)
-    ignored: list[LocalSource] = field(default_factory=list)
-    uploaded: list[LocalSource] = field(default_factory=list)
-    replacements: list[SourceReplacement] = field(default_factory=list)
-    year_map: dict[int, list[str]] = field(default_factory=dict)
-    question_banks: list[str] = field(default_factory=list)
-    question_bank_links: dict[str, list[str]] = field(default_factory=dict)
-    recording_source: str = ""
-    recording_sources: tuple[str, ...] = ()
-    slide_source: str = ""
-    blocking_errors: list[str] = field(default_factory=list)
-    preparation: PreparationReport | None = None
-    reference_guidance: list[dict[str, Any]] = field(default_factory=list)
-    evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
-    assessment_sources: tuple[dict[str, Any], ...] = ()
-
-
-@dataclass(frozen=True)
-class Phase0Request:
-    config: dict[str, Any]
-    requested_notebook_ids: tuple[str, ...]
-    subject: str
-    sources_root: str
-    lecture_name: str
-    recording_sources: tuple[str, ...]
-    slides_path: str | None
-    approved_uploads: tuple[str, ...] = ()
-    agent_reviewed: bool = False
-    assessment_sources: tuple[dict[str, Any], ...] = ()
-    preparation_manifest: dict[str, Any] | None = None
-    prepare_sources: bool = True
-
-    @property
-    def requested_notebook_id(self) -> str:
-        return self.requested_notebook_ids[0]
-
-
-@dataclass(frozen=True)
-class SourceAuthorityRequest:
-    lecture_name: str
-    recording_sources: tuple[str, ...]
-    slides_path: str | None
-
-
-@dataclass(frozen=True)
-class PhaseQuery:
-    config: dict[str, Any]
-    notebook: NotebookTarget
-    query_text: str
-    phase_name: str
-    validator: Callable[[QueryResult], list[str]]
-    source_ids: tuple[str, ...] = ()
-    source_names: tuple[str, ...] = ()
-    notebook_ids: tuple[str, ...] = ()
-    project_scopes: tuple["ProjectQueryScope", ...] = ()
-    normalizer: Callable[[QueryResult], QueryResult] | None = None
-
-
-@dataclass(frozen=True)
-class NlmQueryRequest:
-    config: dict[str, Any]
-    notebook: NotebookTarget
-    query_text: str
-    source_ids: tuple[str, ...]
-    source_names: tuple[str, ...]
-    notebook_ids: tuple[str, ...] = ()
-    phase_name: str = ""
-    project_scopes: tuple["ProjectQueryScope", ...] = ()
-
-
-@dataclass(frozen=True)
-class ProjectQueryScope:
-    notebook_uuid: str
-    source_ids: tuple[str, ...]
-    source_names: tuple[str, ...]
-    source_names_by_id: tuple[tuple[str, str], ...] = ()
-
-
-@dataclass(frozen=True)
-class QueryScope:
-    source_ids: tuple[str, ...]
-    source_names: tuple[str, ...]
-    project_scopes: tuple[ProjectQueryScope, ...] = ()
-
-
-@dataclass(frozen=True)
-class TranscriptIdentity:
-    subject: str
-    title: str
-    emoji: str
-    recording_source: str
-    source_files: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class GeneratedSections:
-    guide: str
-    imp: str
-    mcqs: str
-    written: str
-    cases: str
-
-
-@dataclass(frozen=True)
-class OutputTarget:
-    transcripts_dir: str
-    file_name: str
-    output_path: str
-
-
-@dataclass(frozen=True)
-class RunRequest:
-    subject: str
-    notebook_ids: tuple[str, ...]
-    lecture_name: str
-    recording_sources: tuple[str, ...]
-    slides_path: str | None
-    sources_root: str
-    title: str
-    emoji: str
-    target: OutputTarget
-    audit_only: bool
-    approved_uploads: tuple[str, ...] = ()
-    agent_reviewed: bool = False
-    exam_style_profile: dict[str, Any] = field(default_factory=dict)
-    assessment_sources: tuple[dict[str, Any], ...] = ()
-    draft_only: bool = False
-    finalize_draft: bool = False
-    source_manifest: dict[str, Any] | None = None
-    resume_run: str | None = None
-    resume_latest: bool = False
-    retry_phase: str | None = None
-    recovery_phase: str | None = None
-    recovery_response: str | None = None
-
-    @property
-    def notebook_id(self) -> str:
-        return self.notebook_ids[0]
-
-
-@dataclass(frozen=True)
-class PipelineContext:
-    config: dict[str, Any]
-    report: Phase0Report
-    identity: TranscriptIdentity
-    source_manifest: str
-    badge_instructions: str
-    verified_years: set[int]
-    evidence_sources: list[str]
-    guide_scope: QueryScope
-    assessment_scope: QueryScope
-    exam_style_profile: dict[str, Any] = field(default_factory=dict)
-    evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
-    assessment_source_scope: QueryScope = field(
-        default_factory=lambda: QueryScope((), ())
-    )
-
-
-@dataclass(frozen=True)
-class CaseEvidence:
-    year_map: dict[int, list[str]]
-    evidence_sources: list[str]
-    recording_sources: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class QuestionEvidence:
-    year_map: dict[int, list[str]]
-    evidence_sources: list[str]
-    exam_style_profile: dict[str, Any] = field(default_factory=dict)
-    evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
-    recording_sources: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class QuestionProvenanceContext:
-    block: str
-    heading_prefix: str
-    number: str
-    evidence: QuestionEvidence
-    badges: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class UploadOutcome:
-    remote_sources: list[RemoteSource]
-    uploaded_by_run: bool
-
-
-@dataclass(frozen=True)
-class PhaseCheckpointUpdate:
-    run_dir: Path
-    checkpoint: dict[str, Any]
-    phase: str
-    status: str
-    answer: str = ""
-    errors: tuple[str, ...] = ()
-    source_quarantine: tuple[SourceQuarantine, ...] = ()
-
-
-@dataclass(frozen=True)
-class RecoveryBundle:
-    run_dir: Path
-    phase: str
-    answer: str
-    errors: tuple[str, ...]
-    checkpoint: dict[str, Any]
-    source_names: tuple[str, ...] = ()
-    source_quarantine: tuple[SourceQuarantine, ...] = ()
-
-
-@dataclass(frozen=True)
-class TranscriptSaveRequest:
-    identity: TranscriptIdentity
-    sections: GeneratedSections
-    target: OutputTarget
-    verified_years: set[int]
-    exam_style_profile: dict[str, Any]
-    evidence_catalog: list[dict[str, Any]]
+# Errors and data records now live in transcriber_models; they are
+# re-exported here so every existing `universal_transcribe.<Name>` import
+# keeps working while the engine is split up.
+from transcriber_models import (  # noqa: F401
+    CaseEvidence,
+    CheckpointError,
+    GeneratedSections,
+    LocalSource,
+    NlmError,
+    NlmQueryRequest,
+    NotebookTarget,
+    OCRReport,
+    OutputTarget,
+    PDFMetrics,
+    Phase0Error,
+    Phase0Report,
+    Phase0Request,
+    PhaseCheckpointUpdate,
+    PhaseQuery,
+    PhaseValidationError,
+    PipelineContext,
+    ProjectQueryScope,
+    QueryResult,
+    QueryScope,
+    QuestionEvidence,
+    QuestionProvenanceContext,
+    RecoveryBundle,
+    RemoteSource,
+    RunRequest,
+    SourceAuthorityRequest,
+    SourceQuarantine,
+    SourceReplacement,
+    TranscriberError,
+    TranscriptIdentity,
+    TranscriptSaveRequest,
+    UploadOutcome,
+    ValidationError,
+    MAX_ATTEMPTS,
+)
 
 
 def _unique_strings(values: list[str]) -> list[str]:
@@ -559,24 +258,52 @@ def _configure_line_buffering() -> None:
             reconfigure(line_buffering=True)
 
 
+DEFAULT_CONFIG: dict[str, Any] = {
+    # The tool is subject-agnostic; the module supplies the real subject.
+    "default_subject": "",
+    "notebook_ids": {},
+    "nlm_executable": "nlm",
+    "nlm_profile": None,
+    "modules_root": "modules",
+    "transcripts_root": "Transcripts",
+    "emoji_by_subject": {},
+}
+
+
 def load_config() -> dict[str, Any]:
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-                loaded_config = json.load(config_file)
-            if isinstance(loaded_config, dict):
-                return loaded_config
-        except (OSError, json.JSONDecodeError):
-            pass
-    return {
-        "default_subject": "Toxicology",
-        "notebook_ids": {},
-        "nlm_executable": "nlm",
-        "nlm_profile": None,
-        "modules_root": "modules",
-        "transcripts_root": "Transcripts",
-        "emoji_by_subject": {},
-    }
+    """Read config.json, saying so loudly when it exists but cannot be used.
+
+    A trailing comma used to be swallowed silently and the run continued on
+    defaults, so a user who had configured an nlm profile or a modules root
+    never learned their file was ignored.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            loaded_config = json.load(config_file)
+    except json.JSONDecodeError as error:
+        print(
+            f"[!] {CONFIG_PATH} is not valid JSON ({error}); falling back to "
+            "defaults. Every setting in that file is being ignored.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_CONFIG)
+    except OSError as error:
+        print(
+            f"[!] {CONFIG_PATH} could not be read ({error}); falling back to "
+            "defaults.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_CONFIG)
+    if not isinstance(loaded_config, dict):
+        print(
+            f"[!] {CONFIG_PATH} must contain a JSON object, not "
+            f"{type(loaded_config).__name__}; falling back to defaults.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_CONFIG)
+    return {**DEFAULT_CONFIG, **loaded_config}
 
 
 def get_project_dir() -> str:
@@ -617,6 +344,78 @@ def _nlm_command(config: dict[str, Any], arguments: list[str]) -> list[str]:
     return command
 
 
+INVENTORY_CACHE_TTL_SECONDS = 180
+# nlm verbs that change what a notebook contains. Any of them makes a cached
+# source inventory wrong, so the cache is dropped the moment one succeeds.
+MUTATING_NLM_VERBS = frozenset(
+    {"add", "create", "delete", "import", "remove", "rm", "upload"}
+)
+_INVENTORY_CACHE_ROOT: Path | None = None
+
+
+def set_inventory_cache_root(sources_root: str | None) -> None:
+    """Point the remote-inventory cache at this run's module cache directory.
+
+    The launcher runs the read-only audit and the real run as two processes, so
+    the cache has to live on disk for the second one to benefit from the first.
+    """
+    global _INVENTORY_CACHE_ROOT
+    if not sources_root or os.environ.get("TRANSCRIBER_DISABLE_INVENTORY_CACHE"):
+        _INVENTORY_CACHE_ROOT = None
+        return
+    _INVENTORY_CACHE_ROOT = Path(sources_root) / ".transcriber-cache" / "inventory"
+
+
+def _inventory_cache_ttl() -> int:
+    raw = os.environ.get("TRANSCRIBER_INVENTORY_CACHE_TTL")
+    if raw and raw.strip().isdigit():
+        return int(raw.strip())
+    return INVENTORY_CACHE_TTL_SECONDS
+
+
+def _inventory_cache_file(notebook_uuid: str) -> Path | None:
+    if _INVENTORY_CACHE_ROOT is None or not notebook_uuid:
+        return None
+    key = hashlib.sha256(notebook_uuid.encode("utf-8")).hexdigest()[:16]
+    return _INVENTORY_CACHE_ROOT / f"sources-{key}.json"
+
+
+def _read_cached_inventory(notebook_uuid: str) -> Any | None:
+    path = _inventory_cache_file(notebook_uuid)
+    if path is None:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - float(payload["fetched_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if age < 0 or age > _inventory_cache_ttl():
+        return None
+    return payload.get("inventory")
+
+
+def _store_cached_inventory(notebook_uuid: str, inventory: Any) -> None:
+    path = _inventory_cache_file(notebook_uuid)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(path, {"fetched_at": time.time(), "inventory": inventory})
+    except OSError:
+        # A cache that cannot be written is a missed optimisation, never a
+        # reason to fail the run.
+        pass
+
+
+def invalidate_inventory_cache() -> None:
+    if _INVENTORY_CACHE_ROOT is None:
+        return
+    try:
+        shutil.rmtree(_INVENTORY_CACHE_ROOT)
+    except OSError:
+        pass
+
+
 def _run_nlm_json(
     config: dict[str, Any],
     arguments: list[str],
@@ -637,6 +436,8 @@ def _run_nlm_json(
     if completed.returncode != 0:
         message = completed.stderr.strip() or completed.stdout.strip()
         raise NlmError(f"{operation} failed: {message[:500]}")
+    if MUTATING_NLM_VERBS.intersection(arguments):
+        invalidate_inventory_cache()
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -765,8 +566,11 @@ def _source_items(payload: Any) -> list[dict[str, Any]]:
 def _remote_source_inventory(
     notebook_uuid: str, config: dict[str, Any] | None = None
 ) -> Any:
+    cached = _read_cached_inventory(notebook_uuid)
+    if cached is not None:
+        return cached
     try:
-        return _run_nlm_json(
+        inventory = _run_nlm_json(
             config or {},
             ["source", "list", notebook_uuid],
             120,
@@ -774,6 +578,8 @@ def _remote_source_inventory(
         )
     except NlmError as error:
         raise Phase0Error(str(error)) from error
+    _store_cached_inventory(notebook_uuid, inventory)
+    return inventory
 
 
 def _remote_source_title(source_entry: dict[str, Any]) -> str:
@@ -862,30 +668,6 @@ def normalize_relative_source_path(source_path: str) -> str:
     normalized = unicodedata.normalize("NFKC", source_path or "")
     normalized = normalized.replace("\\", "/").casefold().strip(" ./")
     return re.sub(r"/+", "/", normalized)
-
-
-def extract_exam_years(source_text: str) -> tuple[int, ...]:
-    normalized = unicodedata.normalize("NFKC", source_text or "").translate(ARABIC_DIGITS)
-    maximum = date.today().year + 1
-    years = {int(year) for year in re.findall(r"(?<!\d)(20\d{2})(?!\d)", normalized)}
-    return tuple(
-        sorted(
-            year
-            for year in years
-            if MIN_REASONABLE_EXAM_YEAR <= year <= maximum
-        )
-    )
-
-
-def extract_filename_exam_years(file_name: str) -> tuple[int, ...]:
-    normalized = unicodedata.normalize("NFKC", file_name or "").translate(ARABIC_DIGITS)
-    years = set(extract_exam_years(normalized))
-    maximum = date.today().year + 1
-    for short_year in re.findall(r"(?<!\d)(2\d)(?!\d)", normalized):
-        expanded = 2000 + int(short_year)
-        if MIN_REASONABLE_EXAM_YEAR <= expanded <= maximum:
-            years.add(expanded)
-    return tuple(sorted(years))
 
 
 def _classify_source(path: str, root_name: str) -> str:
@@ -1109,11 +891,29 @@ def scan_local_sources(
         if normalize_relative_source_path(source.relative_path)
         not in classified_question_paths
     )
-    if unclassified_question_paths:
+    ambiguous_paths = [
+        path for path in unclassified_question_paths if _path_claims_a_year(path)
+    ]
+    if ambiguous_paths:
+        # A filename carrying a year would become a **[Past Exams - YYYY]**
+        # badge. Guessing that is fabricating provenance, so it stays a hard
+        # stop -- but only for these, not for every unclassified file.
         raise Phase0Error(
-            "Assessment manifest does not classify: "
-            + ", ".join(unclassified_question_paths)
+            "Assessment manifest must classify these year-bearing source(s) so "
+            "their exam years are verified: " + ", ".join(ambiguous_paths)
         )
+    default_question_bank_paths = [
+        path for path in unclassified_question_paths if path not in set(ambiguous_paths)
+    ]
+    if default_question_bank_paths:
+        print(
+            "[!] Assessment manifest did not classify "
+            f"{len(default_question_bank_paths)} file(s) under Questions/; "
+            "treating them as question_bank (no exam year claimed): "
+            + ", ".join(default_question_bank_paths)
+        )
+        for path in default_question_bank_paths:
+            classifications[path] = ("question_bank", ())
     for source in local_sources:
         classification = classifications.get(
             normalize_relative_source_path(source.relative_path)
@@ -1124,169 +924,34 @@ def scan_local_sources(
     return local_sources
 
 
-def _garbage_ratio(text: str) -> float:
-    if not text:
-        return 1.0
-    garbage = text.count("\ufffd") + sum(
-        1 for character in text if ord(character) < 32 and character not in "\n\r\t\f"
-    )
-    return garbage / max(len(text), 1)
+def _path_claims_a_year(path: str) -> bool:
+    """True when a filename would imply an exam year if left unclassified."""
+    name = os.path.basename(path)
+    if re.search(r"(?:^|\D)(20[12]\d)(?:\D|$)", name):
+        return True
+    for match in re.findall(r"(?:^|\D)([12]\d)(?:\D|$)", name):
+        if 18 <= int(match) <= 30:
+            return True
+    return False
 
 
-def _pdf_tool_failure(source: LocalSource, reason: str) -> tuple[OCRReport, tuple[int, ...]]:
-    return OCRReport(source.path, "fail", reason[:500]), ()
+# Document text verification now lives in document_verify.
+from document_verify import (  # noqa: F401
+    _docx_report,
+    _docx_text,
+    _garbage_ratio,
+    _pdf_metrics,
+    _pdf_pages,
+    _pdf_quality,
+    _pdf_report,
+    _pdf_tool_failure,
+    _run_pdf_tools,
+    _verify_docx,
+    _verify_pdf,
+    verify_document_text,
+)
 
 
-def _run_pdf_tools(
-    source: LocalSource,
-) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
-    page_metadata = subprocess.run(
-        ["pdfinfo", source.path], capture_output=True, text=True, timeout=60
-    )
-    extracted_text = subprocess.run(
-        ["pdftotext", "-layout", source.path, "-"],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    return page_metadata, extracted_text
-
-
-def _pdf_pages(page_metadata: str, extracted_text: str) -> tuple[int, list[str]]:
-    page_match = re.search(r"^Pages:\s+(\d+)", page_metadata, flags=re.MULTILINE)
-    declared_pages = int(page_match.group(1)) if page_match else 0
-    pages = extracted_text.split("\f")
-    if pages and not pages[-1].strip():
-        pages.pop()
-    if declared_pages and len(pages) < declared_pages:
-        pages.extend([""] * (declared_pages - len(pages)))
-    return declared_pages or max(len(pages), 1), pages
-
-
-def _pdf_metrics(page_metadata: str, extracted_text: str) -> PDFMetrics:
-    page_count, pages = _pdf_pages(page_metadata, extracted_text)
-    character_counts = [sum(character.isalnum() for character in page) for page in pages]
-    sparse_pages = sum(count < 20 for count in character_counts)
-    return PDFMetrics(
-        page_count=page_count,
-        text_pages=sum(count >= 20 for count in character_counts),
-        total_characters=sum(character_counts),
-        sparse_page_ratio=sparse_pages / max(page_count, 1),
-        garbage_ratio=_garbage_ratio(extracted_text),
-    )
-
-
-def _pdf_quality(metrics: PDFMetrics, source_role: str) -> tuple[str, str]:
-    if metrics.total_characters < 50:
-        return "fail", "No usable OCR/text layer was extracted"
-    if metrics.garbage_ratio > 0.02:
-        return "fail", "Extracted text contains excessive corrupt characters"
-    if metrics.sparse_page_ratio > 0.80 and source_role in {
-        "past_exam",
-        "question_bank",
-    }:
-        return "fail", "Most exam/question-bank pages have no usable text"
-    characters_per_page = metrics.total_characters / max(metrics.page_count, 1)
-    if metrics.sparse_page_ratio > 0.60 or characters_per_page < 80:
-        return "warning", "Text is sparse; review OCR quality manually"
-    return "pass", "Extractable text is available"
-
-
-def _pdf_report(source: LocalSource, metrics: PDFMetrics) -> OCRReport:
-    status, reason = _pdf_quality(metrics, source.role)
-    return OCRReport(
-        path=source.path,
-        status=status,
-        reason=reason,
-        page_count=metrics.page_count,
-        text_pages=metrics.text_pages,
-        total_characters=metrics.total_characters,
-        sparse_page_ratio=metrics.sparse_page_ratio,
-        garbage_ratio=metrics.garbage_ratio,
-    )
-
-
-def _verify_pdf(source: LocalSource) -> tuple[OCRReport, tuple[int, ...]]:
-    if not shutil.which("pdfinfo") or not shutil.which("pdftotext"):
-        return _pdf_tool_failure(
-            source, "pdfinfo and pdftotext are required for PDF text verification"
-        )
-    try:
-        page_metadata, extracted_text = _run_pdf_tools(source)
-    except subprocess.TimeoutExpired:
-        return _pdf_tool_failure(source, "PDF text extraction timed out")
-    if page_metadata.returncode != 0 or extracted_text.returncode != 0:
-        reason = (
-            extracted_text.stderr.strip()
-            or page_metadata.stderr.strip()
-            or "PDF extraction failed"
-        )
-        return _pdf_tool_failure(source, reason)
-    metrics = _pdf_metrics(page_metadata.stdout, extracted_text.stdout)
-    return _pdf_report(source, metrics), extract_exam_years(extracted_text.stdout)
-
-
-def _docx_text(source: LocalSource) -> str:
-    with zipfile.ZipFile(source.path) as archive:
-        document_xml = archive.read("word/document.xml")
-    root = ElementTree.fromstring(document_xml)
-    return " ".join(node.text or "" for node in root.iter() if node.tag.endswith("}t"))
-
-
-def _docx_report(source: LocalSource, text: str) -> OCRReport:
-    total_characters = sum(character.isalnum() for character in text)
-    garbage_ratio = _garbage_ratio(text)
-    status, reason = "pass", "Extractable document text is available"
-    if total_characters < 50:
-        status, reason = "fail", "DOCX is empty or image-only and needs OCR"
-    elif garbage_ratio > 0.02:
-        status, reason = "fail", "DOCX text contains excessive corrupt characters"
-    elif total_characters < 200:
-        status, reason = "warning", "DOCX contains very little extractable text"
-    return OCRReport(
-        path=source.path,
-        status=status,
-        reason=reason,
-        total_characters=total_characters,
-        text_pages=1 if total_characters else 0,
-        garbage_ratio=garbage_ratio,
-    )
-
-
-def _verify_docx(source: LocalSource) -> tuple[OCRReport, tuple[int, ...]]:
-    try:
-        text = _docx_text(source)
-    except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as error:
-        return OCRReport(source.path, "fail", f"DOCX extraction failed: {error}"), ()
-    return _docx_report(source, text), extract_exam_years(text)
-
-
-def verify_document_text(local_sources: list[LocalSource]) -> None:
-    for source in local_sources:
-        if source.is_preparation_planned:
-            source.ocr = OCRReport(
-                source.path,
-                "planned",
-                f"{source.preparation_action} will create the searchable upload artifact",
-            )
-            continue
-        if source.preparation_action == "use_remote":
-            source.ocr = OCRReport(
-                source.path,
-                "remote",
-                "A ready NotebookLM equivalent is authoritative; local text is not required",
-            )
-            continue
-        report: OCRReport | None = None
-        text_years: tuple[int, ...] = ()
-        effective_extension = source.upload_extension
-        if effective_extension == ".pdf":
-            report, text_years = _verify_pdf(source)
-        elif effective_extension == ".docx":
-            report, text_years = _verify_docx(source)
-        source.ocr = report
-        if not source.years_verified_by_manifest:
-            source.years = tuple(sorted(set(source.years).union(text_years)))
 
 
 def build_exam_year_map(local_sources: list[LocalSource]) -> dict[int, list[str]]:
@@ -2241,8 +1906,7 @@ def _initial_phase0_report(request: Phase0Request) -> Phase0Report:
     report.preparation = preparation
     report.reference_guidance = _reference_guidance_from_preparation(preparation)
     report.assessment_sources = request.assessment_sources
-    report.evidence_catalog = build_evidence_catalog(report)
-    report.year_map = _year_map_from_catalog(report.evidence_catalog)
+    _rebuild_evidence_catalog(report)
     report.blocking_errors.extend(preparation.blocking_errors)
     return report
 
@@ -2330,8 +1994,7 @@ def _refresh_evidence_metadata(report: Phase0Report) -> None:
         source.name for source in remotely_available if source.role == "question_bank"
     )
     report.question_bank_links = link_exam_sources_to_question_banks(remotely_available)
-    report.evidence_catalog = build_evidence_catalog(report)
-    report.year_map = _year_map_from_catalog(report.evidence_catalog)
+    _rebuild_evidence_catalog(report)
 
 
 def _approved_upload_candidates(
@@ -2656,6 +2319,9 @@ def run_phase0_sync(request: Phase0Request) -> Phase0Report:
     if not report.blocking_errors:
         _upload_phase0_sources(request, report)
     _resolve_remote_authority(request, report)
+    # selected_for_run is derived from the resolved authority, so the catalog
+    # built during the initial report is stale by definition.
+    _rebuild_evidence_catalog(report)
     print_phase0_report(report)
     if report.blocking_errors:
         raise Phase0Error("; ".join(report.blocking_errors))
@@ -2668,6 +2334,7 @@ def run_phase0_audit(request: Phase0Request) -> Phase0Report:
     _append_ocr_failures(report)
     _append_ambiguous_matches(request, report)
     _resolve_audit_authority(request, report)
+    _rebuild_evidence_catalog(report)
     print_phase0_audit_report(report)
     return report
 
@@ -2744,7 +2411,9 @@ def _merge_imp_answers(answers: list[str]) -> str:
     if not any(sections.values()):
         return "\n\n".join(answer.strip() for answer in answers if answer.strip())
     return "\n\n".join(
-        heading + "\n" + ("\n\n".join(sections[heading]) or "None explicitly stated")
+        heading
+        + "\n"
+        + ("\n\n".join(_unique_strings(sections[heading])) or "None explicitly stated")
         for heading in IMP_HEADINGS
     )
 
@@ -2790,12 +2459,35 @@ def _renumber_project_answer(
     return pattern.sub(replace, answer), number
 
 
+def is_empty_sentinel(answer: str, sentinel: str) -> bool:
+    """True when an answer is the no-content sentinel, with or without a reason.
+
+    The IMP prompts now require a written reason on the line after the
+    sentinel, so an exact string comparison would treat a justified refusal as
+    a malformed section.
+    """
+    stripped = (answer or "").strip()
+    return stripped == sentinel or stripped.startswith(f"{sentinel}\n")
+
+
+def empty_sentinel_reason(answer: str, sentinel: str) -> str:
+    if not is_empty_sentinel(answer, sentinel):
+        return ""
+    return (answer or "").strip()[len(sentinel):].strip()
+
+
+def _is_any_empty_sentinel(answer: str) -> bool:
+    return any(
+        is_empty_sentinel(answer, sentinel) for sentinel in (NO_MCQS, NO_WRITTEN)
+    )
+
+
 def _usable_query_results(query_results: list[QueryResult]) -> list[QueryResult]:
     return [
         query_result
         for query_result in query_results
         if query_result.answer.strip()
-        and query_result.answer.strip() not in {NO_MCQS, NO_WRITTEN}
+        and not _is_any_empty_sentinel(query_result.answer)
     ]
 
 
@@ -2817,6 +2509,34 @@ def _query_source_quarantine(
     return tuple(unique.values())
 
 
+PROSE_PHASES = frozenset({"Chronological Guide"})
+
+
+def deduplicate_prose_blocks(text: str) -> str:
+    """Drop repeated ### blocks produced by querying one phase in slices.
+
+    NotebookLM caps how many source IDs one request may carry, so a phase with
+    more sources than the cap is sent as several sliced queries and the answers
+    are concatenated. For the question phases that is what we want -- each
+    slice finds different questions. For narrative prose it is not: every slice
+    returns the same walkthrough of the same lecture, so the guide arrived at
+    exactly double length with all 28 of its sections repeated verbatim.
+    """
+    blocks = re.split(r"(?m)^(?=#{3,6} )", text)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+        key = re.sub(r"\s+", " ", stripped)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(stripped)
+    return "\n\n".join(kept)
+
+
 def _merge_answer_bodies(query_results: list[QueryResult], phase_name: str) -> str:
     if phase_name == "IMP Points":
         return _merge_imp_answers([query_result.answer for query_result in query_results])
@@ -2827,7 +2547,10 @@ def _merge_answer_bodies(query_results: list[QueryResult], phase_name: str) -> s
             query_result.answer, phase_name, next_number
         )
         answer_parts.append(numbered.strip())
-    return "\n\n".join(answer_parts)
+    merged = "\n\n".join(answer_parts)
+    if phase_name in PROSE_PHASES:
+        return deduplicate_prose_blocks(merged)
+    return merged
 
 
 def _merge_notebook_query_results(
@@ -3054,10 +2777,9 @@ PhaseValidator = Callable[[QueryResult], list[str]]
 def _query_response_errors(
     query_result: QueryResult, validator: PhaseValidator
 ) -> list[str]:
-    if len(query_result.answer) < 50 and query_result.answer.strip() not in {
-        NO_MCQS,
-        NO_WRITTEN,
-    }:
+    if len(query_result.answer) < 50 and not _is_any_empty_sentinel(
+        query_result.answer
+    ):
         errors = ["response is empty or too short"]
     else:
         errors = []
@@ -3230,6 +2952,7 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                     last_answer,
                     last_source_names,
                     last_source_quarantine,
+                    attempts=attempt,
                 ) from error
             if (
                 query.phase_name in {"MCQs", "Written Questions"}
@@ -3249,8 +2972,10 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
 
         if last_errors and last_answer:
             print(
-                f"[Recovery] {query.phase_name} produced raw text with {len(last_errors)} validation issue(s); "
-                "bypassing redundant LLM query retries for immediate Agent in-flight repair"
+                f"[Recovery] {query.phase_name} produced raw text with "
+                f"{len(last_errors)} validation issue(s) on attempt "
+                f"{attempt}/{MAX_ATTEMPTS}; bypassing redundant LLM query "
+                "retries for immediate Agent in-flight repair"
             )
             raise PhaseValidationError(
                 query.phase_name,
@@ -3258,6 +2983,7 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
                 last_answer,
                 last_source_names,
                 last_source_quarantine,
+                attempts=attempt,
             )
 
         if attempt < MAX_ATTEMPTS:
@@ -3274,6 +3000,8 @@ def run_nlm_query(query: PhaseQuery) -> QueryResult:
         last_answer,
         last_source_names,
         last_source_quarantine,
+        attempts=MAX_ATTEMPTS,
+        exhausted=True,
     )
 
 
@@ -3341,13 +3069,47 @@ def _remote_sources_for_local(
     ]
 
 
+ALWAYS_SELECTED_ROLES = frozenset({"textbook", "reference", "handout"})
+ASSESSMENT_ROLES = frozenset({"past_exam", "question_bank"})
+
+
+def _authority_match_keys(report: Phase0Report) -> tuple[set[str], set[str]]:
+    """Return the normalized names and stems of this run's authority sources.
+
+    Both are empty until ``resolve_*_source_authority`` has run, which is why
+    the catalog has to be built after authority resolution rather than before.
+    """
+    authority_names = (*report.recording_sources, report.slide_source)
+    return (
+        {normalize_source_key(name) for name in authority_names if name},
+        {normalize_source_stem(name) for name in authority_names if name},
+    )
+
+
+def _names_match_authority(
+    names: Iterable[str], authority_keys: set[str], authority_stems: set[str]
+) -> bool:
+    return any(
+        normalize_source_key(name) in authority_keys
+        or normalize_source_stem(name) in authority_stems
+        for name in names
+        if name
+    )
+
+
 def _local_evidence_entry(
-    report: Phase0Report, local_source: LocalSource
+    report: Phase0Report,
+    local_source: LocalSource,
+    authority_keys: set[str] | None = None,
+    authority_stems: set[str] | None = None,
 ) -> tuple[tuple[str, str], dict[str, Any]]:
     remotes = _remote_sources_for_local(report, local_source)
     canonical_name = remotes[0].title if remotes else local_source.name
     source_ids = _unique_strings([remote.source_id for remote in remotes])
     notebook_ids = _unique_strings([remote.notebook_uuid for remote in remotes])
+    aliases = _unique_strings([local_source.name, *(remote.title for remote in remotes)])
+    if authority_keys is None or authority_stems is None:
+        authority_keys, authority_stems = _authority_match_keys(report)
     return (
         (normalize_source_key(canonical_name), local_source.role),
         {
@@ -3363,10 +3125,13 @@ def _local_evidence_entry(
             else [],
             "local_path": local_source.original_path or local_source.path,
             "remote_status": [remote.status or "available" for remote in remotes],
-            "aliases": _unique_strings(
-                [local_source.name, *(remote.title for remote in remotes)]
-            ),
+            "aliases": aliases,
             "content_status": "available" if remotes else "local_only",
+            "selected_for_run": (
+                local_source.role in ALWAYS_SELECTED_ROLES
+                or local_source.role in ASSESSMENT_ROLES
+                or _names_match_authority(aliases, authority_keys, authority_stems)
+            ),
         },
     )
 
@@ -3401,33 +3166,16 @@ def _remote_only_evidence_entry(
             remote.normalized_name in authority_keys
             or remote.normalized_stem in authority_stems
             or assessment is not None
-            or role in {"textbook", "reference", "handout"}
+            or role in ALWAYS_SELECTED_ROLES
         ),
-
     }
 
 
-def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
-    """Build the canonical source inventory used by prompts and validators."""
-    catalog: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str, str]] = set()
-    for local_source in (source for source in report.local_sources if source.role != "ignore"):
-        key, entry = _local_evidence_entry(report, local_source)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        catalog.append(entry)
-    local_keys = {
-        normalize_source_key(str(entry.get("canonical_name", "")))
-        for entry in catalog
-    }
-    authority_names = (*report.recording_sources, report.slide_source)
-    authority_keys = {normalize_source_key(name) for name in authority_names if name}
-    authority_stems = {normalize_source_stem(name) for name in authority_names if name}
-    assessment_metadata: dict[str, tuple[str, tuple[int, ...]]] = {}
+def _assessment_metadata(report: Phase0Report) -> dict[str, tuple[str, tuple[int, ...]]]:
+    metadata: dict[str, tuple[str, tuple[int, ...]]] = {}
     for assessment_source in report.assessment_sources:
         source_type = str(assessment_source.get("type", "")).strip()
-        if source_type not in {"past_exam", "question_bank"}:
+        if source_type not in ASSESSMENT_ROLES:
             continue
         path = str(assessment_source.get("path", "")).strip()
         if not path:
@@ -3444,14 +3192,76 @@ def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
             normalize_source_key(os.path.basename(path)),
             normalize_source_stem(path),
         }:
-            assessment_metadata[key] = (source_type, years)
-    catalog.extend(
-        _remote_only_evidence_entry(
+            metadata[key] = (source_type, years)
+    return metadata
+
+
+def _merge_remote_entry(target: dict[str, Any], extra: dict[str, Any]) -> None:
+    """Fold a duplicate NotebookLM upload into the entry already in the catalog.
+
+    The same file can be uploaded to a notebook several times; each upload gets
+    its own source id but they are one piece of evidence, so the ids are merged
+    rather than emitted as separate catalog entries.
+    """
+    for list_key in ("source_ids", "notebook_ids", "remote_status", "aliases"):
+        target[list_key] = _unique_strings([*target[list_key], *extra[list_key]])
+    target["source_id"] = (
+        target["source_ids"][0] if len(target["source_ids"]) == 1 else ""
+    )
+    target["notebook_id"] = (
+        target["notebook_ids"][0] if len(target["notebook_ids"]) == 1 else ""
+    )
+    target["selected_for_run"] = bool(
+        target["selected_for_run"] or extra["selected_for_run"]
+    )
+    if extra["content_status"] == "remote_only":
+        target["content_status"] = "remote_only"
+    target["verified_years"] = sorted(
+        {*target["verified_years"], *extra["verified_years"]}
+    )
+
+
+def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
+    """Build the canonical source inventory used by prompts and validators.
+
+    ``selected_for_run`` is derived from ``report.recording_sources`` and
+    ``report.slide_source``, so this must be called *after* the authority has
+    been resolved.  ``_rebuild_evidence_catalog`` is the guarded entry point.
+    """
+    authority_keys, authority_stems = _authority_match_keys(report)
+    assessment_metadata = _assessment_metadata(report)
+    catalog: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for local_source in (source for source in report.local_sources if source.role != "ignore"):
+        key, entry = _local_evidence_entry(
+            report, local_source, authority_keys, authority_stems
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        catalog.append(entry)
+    local_keys = {
+        normalize_source_key(str(entry.get("canonical_name", "")))
+        for entry in catalog
+    }
+    remote_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for remote in report.remote_sources:
+        if normalize_source_key(remote.title) in local_keys:
+            continue
+        entry = _remote_only_evidence_entry(
             remote, authority_keys, authority_stems, assessment_metadata
         )
-        for remote in report.remote_sources
-        if normalize_source_key(remote.title) not in local_keys
-    )
+        remote_key = (
+            str(entry["normalized_name"]),
+            str(entry["role"]),
+            str(remote.notebook_uuid or ""),
+        )
+        existing = remote_by_key.get(remote_key)
+        if existing is None:
+            remote_by_key[remote_key] = entry
+            continue
+        _merge_remote_entry(existing, entry)
+    catalog.extend(remote_by_key.values())
     return sorted(
         catalog,
         key=lambda entry: (
@@ -3459,6 +3269,11 @@ def build_evidence_catalog(report: Phase0Report) -> list[dict[str, Any]]:
             str(entry.get("canonical_name", "")).casefold(),
         ),
     )
+
+
+def _rebuild_evidence_catalog(report: Phase0Report) -> None:
+    report.evidence_catalog = build_evidence_catalog(report)
+    report.year_map = _year_map_from_catalog(report.evidence_catalog)
 
 
 def _catalog_entry_is_available(entry: dict[str, Any]) -> bool:
@@ -3610,47 +3425,8 @@ def _assessment_source_scope(report: Phase0Report) -> QueryScope:
     return _build_query_scope(report, {"past_exam", "question_bank"}, ())
 
 
-def _truncate_query_fragment(text: str, limit: int) -> str:
-    """Return a readable, line-safe fragment for a provider-bound query."""
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    if limit <= 40:
-        return text[:limit]
-    shortened = text[: limit - 32].rsplit("\n", 1)[0].rstrip()
-    if not shortened:
-        shortened = text[: limit - 32].rstrip()
-    return f"{shortened}\n[remaining guidance omitted for query size]"
 
 
-def _compact_assessment_context(context: str) -> str:
-    """Keep only source identity lines in assessment prompts.
-
-    Guide/IMP prompts still receive the full authority manifest.  MCQ and
-    written-question prompts already receive the exact assessment source IDs
-    through ``--source-ids``; repeating the full manifest and enrichment
-    policy only increases the provider request size and can trigger its
-    generic ``invalid query`` response.  This fallback also protects callers
-    that pass the old full manifest directly to a prompt builder.
-    """
-    context = context.strip()
-    if len(context) <= MAX_ASSESSMENT_CONTEXT_CHARS:
-        return context
-
-    useful_lines: list[str] = []
-    for line in context.splitlines():
-        normalized = line.casefold()
-        if (
-            "verified past-exam" in normalized
-            or "question-bank" in normalized
-            or "canonical:" in normalized
-            or re.match(r"\s*-\s*20\d{2}:", line)
-        ):
-            useful_lines.append(line.strip())
-    compact = "\n".join(dict.fromkeys(useful_lines))
-    if not compact:
-        compact = context
-    return _truncate_query_fragment(compact, MAX_ASSESSMENT_CONTEXT_CHARS)
 
 
 def build_assessment_source_context(report: Phase0Report) -> str:
@@ -3765,275 +3541,28 @@ def canonical_badge_instructions(year_map: dict[int, list[str]]) -> str:
     )
 
 
-def render_exam_style_profile(
-    profile: dict[str, Any], max_chars: int | None = None
-) -> str:
-    """Render the agent's style observations as bounded, non-content guidance."""
-    if not profile:
-        rendered = (
-            "No agent-supplied exam style profile is available. Infer formatting "
-            "only from the verified past-exam/question-bank samples in the source scope."
-        )
-    else:
-        rendered = (
-            "AGENT-SUPPLIED EXAM STYLE PROFILE (format guidance only; never evidence or "
-            "medical content):\n"
-            + json.dumps(profile, ensure_ascii=False, indent=2)
-        )
-    return (
-        _truncate_query_fragment(rendered, max_chars)
-        if max_chars is not None
-        else rendered
-    )
 
 
-def build_guide_prompt(subject: str, title: str, context: str) -> str:
-    return f"""Create only the body of the 📖 Chronological Guide for {subject}: '{title}'.
-
-{context}
-The named recording is the sole authority for what the doctor said, the exact
-teaching chronology, emphasis, dialogue, jokes, anecdotes, pauses, and
-administrative remarks. Follow it step by step without summarizing, regrouping
-into textbook order, or inventing transitions. Preserve quoted speech and
-questions verbatim whenever the recording supports it.
-
-Write the explanation in Egyptian Arabic mixed with precise English medical
-terms. Use the slide source for titles, table structure, and figures that
-correspond to spoken material. Use textbooks/references for terminology,
-accuracy, and only the Agent-selected contextual details in the enrichment
-policy. Never dump reference material or present it as spoken commentary. If an
-unspoken book or slide detail directly clarifies a taught point, add it
-selectively in this exact form and do not attribute it to the doctor:
-> [!NOTE]
-> **إضافة من الكتاب/السلايد — لم يشرحها الدكتور في التسجيل**
-> concise contextual addition
-If a reference corrects a spoken terminology error, preserve what was said and
-add a clearly attributed NOTE. Surface conflicts for editorial review instead of
-silently choosing one source.
-
-Return section body only. Use ### and #### headings, never # or ##. Use only
-> [!NOTE], > [!IMPORTANT], > [!WARNING], and > [!CAUTION]. Reserve CAUTION for
-absolute contraindications, red flags, or lethal errors. Do not produce a summary."""
 
 
-def build_imp_prompt(title: str, context: str) -> str:
-    headings = "\n".join(IMP_HEADINGS)
-    return f"""Create only the body of the 🌟 IMP Points section for '{title}'.
-
-{context}
-Use only points explicitly emphasized or spoken in the recording. Do not add
-generic textbook high-yield facts. Return exactly these five #### headings in
-exactly this order and no other headings:
-{headings}
-
-Under Diagnostic Traps, put every item in a > [!WARNING] block. Under Lethal
-Mistakes, put every item in a > [!CAUTION] block. If either category has no
-explicit item, keep its heading and place an explicit 'None explicitly stated in
-the recording' message inside the required callout. Preserve every interactive
-doctor question and the answer actually given. Exam Rules includes grading,
-booklet, attendance, exam format, and other non-medical instructions. Write in
-Egyptian Arabic mixed with English medical terms. Return the section body only."""
 
 
-def build_mcq_prompt(
-    title: str,
-    context: str,
-    badge_instructions: str,
-    exam_style_profile: dict[str, Any] | None = None,
-) -> str:
-    context = _compact_assessment_context(context)
-    style_context = render_exam_style_profile(
-        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
-    )
-    return f"""Create only the body of the ❓ MCQs section for '{title}'.
-
-{context}
-Extract every relevant MCQ from verified past-exam or question-bank sources.
-STRICT LECTURE SCOPE CONSTRAINT: Extract ONLY questions directly relevant to the specific topics, mechanisms, and clinical conditions taught in this lecture's recording and slides for '{title}'. EXCLUDE questions belonging to other chapters or separate lectures that were not taught in this lecture (e.g. do not extract firearm wound mechanics or distant topics in a general mechanical wounds lecture). If a question's topic was not taught in this lecture, omit it entirely.
-Preserve the original wording and meaning but
-repair obvious OCR damage (split letters, joined words, and broken option
-labels). This is OCR normalization, not rewriting: never modernize, paraphrase,
-or improve the question's academic style. State the correct answer and give a concise
-clinical explanation in Egyptian Arabic mixed with precise English medical
-terms; explain distractors when the evidence supports it.
-
-{badge_instructions}
-
-{style_context}
-
-Search every verified past-exam source in the evidence catalog. If the same
-question and medically equivalent options appear in multiple verified years,
-return one block only, collect all years in ascending order, and include one
-**Source:** line for every supporting exam. Add **[Question Bank]** alongside
-the Past Exams badge when a question-bank copy also supports it. Do not merge
-questions when the options, negation, requested count, or clinical meaning differ.
-
-Before returning the section, perform an editorial pass: put one option on each
-line in the learned label order (a., b., c., d.), make Correct Answer start with an existing
-option label, remove NotebookLM citation markers such as [34،86], and stop on
-any word whose OCR cannot be restored confidently.
-
-For every item use this exact field contract with ### MCQ N and its badge(s):
-**Question:**, **Options:** (with each option on a new line: a. ..., b. ..., c. ..., d. ...),
-**Source:** (if past exam/question bank), **Correct Answer:**, and **Clinical Explanation:**.
-If no matching MCQ exists, return exactly {NO_MCQS}. Return section body only;
-never use # or ## headings."""
 
 
-def build_imp_mcq_prompt(
-    title: str, exam_style_profile: dict[str, Any] | None = None
-) -> str:
-    style_context = render_exam_style_profile(exam_style_profile or {})
-    return f"""Create only IMP MCQs for '{title}' from points explicitly emphasized
-in the selected lecture recording. The selected slide source may clarify wording
-but must not introduce an unspoken fact.
-
-{style_context}
-
-Imitate the observed past-exam form exactly: stem length and command pattern,
-four-option layout, option labels and case, punctuation, capitalization,
-parallel option length, and distractor style. Do not copy a sample's subject
-matter, wording, answer, or provenance. Keep stems short and direct; do not make
-a clinical vignette unless the profile shows that pattern.
-
-For every item use ### MCQ N **[IMP]**, then **Question:**, **Options:**,
-**Correct Answer:**, and **Clinical Explanation:**. Put one
-option on each line (a., b., c., d.), ensure the correct answer starts with an existing option
-label, and use no Source field or verbatim label. Return section body only;
-never use # or ## headings. If no emphasized point supports an MCQ, return
-exactly {NO_MCQS}."""
 
 
-def build_written_prompt(
-    title: str,
-    context: str,
-    badge_instructions: str,
-    exam_style_profile: dict[str, Any] | None = None,
-) -> str:
-    context = _compact_assessment_context(context)
-    style_context = render_exam_style_profile(
-        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
-    )
-    return f"""Create only the body of the ✍️ Written Questions section for '{title}'.
-
-{context}
-Extract every matching Essay, Short Note, Enumerate, Compare, Give Reason, or
-other written question from verified exam/question-bank sources.
-STRICT LECTURE SCOPE CONSTRAINT: Extract ONLY questions directly relevant to the specific topics, classifications, and concepts taught in this lecture's recording and slides for '{title}'. EXCLUDE questions belonging to other lectures or separate chapters that were not taught in this lecture. If a question was not taught, omit it entirely.
-Preserve the source wording and meaning while repairing obvious OCR damage in the question
-text; do not paraphrase it into a new academic prompt.
-
-{badge_instructions}
-
-{style_context}
-
-Search all verified assessment sources before returning the section. Merge only
-exact or OCR-safe duplicate written questions, preserving every verified year
-and source line. Keep questions with different command verbs, requested counts,
-scope, or medical meaning separate; send uncertain semantic matches for Agent
-review instead of merging them.
-
-For every item use ### Question N with badge(s), then **Question:**,
-**Source:** (if past exam/question bank), **Model Answer:**, and **Clinical Explanation:**.
-Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
-- For lists, blanks, and enumerations (e.g. 1... 2... 3...): provide only numbered concise keywords:
-  1- Concise keyword 1
-  2- Concise keyword 2
-  3- Concise keyword 3
-- For Give Reason: one concise clause (e.g. Due to inhibition of Cytochrome Oxidase).
-- For Compare: a compact Markdown table containing concise keywords.
-- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
-Clinical Explanation must be in Egyptian Arabic explaining the detailed clinical reasoning, mechanisms, and doctor emphasis.
-Run an editorial OCR pass before returning: repair split letters and joined words only when the source
-supports the repair, remove NotebookLM citation markers, and flag unresolved wording instead of
-guessing. No introduction, conclusion, or filler. If no grounded written
-question exists, return exactly {NO_WRITTEN}. Return section body only; never use
-# or ## headings."""
 
 
-def build_imp_written_prompt(
-    title: str, exam_style_profile: dict[str, Any] | None = None
-) -> str:
-    style_context = render_exam_style_profile(exam_style_profile or {})
-    return f"""Create only IMP written questions for '{title}' from points explicitly
-emphasized in the selected lecture recording. The slide source may clarify
-wording but must not introduce an unspoken fact.
-
-{style_context}
-
-Imitate the observed past-exam form: use the same short command verbs,
-colon/dash/blank conventions, requested number of items, and concise numbered
-answer shape. Do not replace a direct complete, enumerate, causes of, mechanism
-of, treatment of, or give reason form with a long academic essay prompt unless
-the profile shows that pattern.
-
-For every item use ### Question N **[IMP]**, then **Question:**,
-**Model Answer:**, and **Clinical Explanation:**. Use no Source field or verbatim label.
-Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking key style, 1 to 5 words per point):
-- For lists, blanks, and enumerations: provide only numbered concise keywords (1- Keyword 1\n2- Keyword 2\n...).
-- For Give Reason: one concise clause.
-- For Compare: a compact Markdown table with concise keywords.
-- NEVER write long full-sentence explanations or paragraphs inside Model Answer.
-Clinical Explanation must be in Egyptian Arabic explaining the clinical reasoning and exam pearls.
-Return section body only; never use # or ## headings. If no emphasized point supports a written question, return
-exactly {NO_WRITTEN}."""
 
 
-def build_case_prompt(
-    title: str,
-    context: str,
-    badge_instructions: str,
-    exam_style_profile: dict[str, Any] | None = None,
-) -> str:
-    context = _compact_assessment_context(context)
-    style_context = render_exam_style_profile(
-        exam_style_profile or {}, MAX_ASSESSMENT_STYLE_CHARS
-    )
-    return f"""Create only the body of the 🩺 Clinical Cases section for '{title}'.
 
-{context}
 
-{style_context}
 
-Create 2-3 clinically relevant cases within the recording's taught scope.
-STRICT LECTURE SCOPE CONSTRAINT: Sourced cases and questions MUST strictly fall within the taught scope, conditions, and mechanisms of '{title}' (recording and slides). Do not include case vignettes for other distinct lectures.
-Study past exam patterns and observed question structures from the course to match:
-- The typical case scenario style and length
-- For cases sourced from past exams, reproduce all original sub-questions verbatim in their exact count, text, and sequence without omitting or shortening any sub-questions.
-- For newly synthesized cases, questions MUST strictly follow the standard Egyptian medical exam case breakdown matching the subject/specialty (e.g. 1. Diagnosis / Most likely diagnosis, 2. DDx (Differential diagnosis) or Pathognomonic Clinical Picture (CP), 3. Diagnostic Investigations / Lab tests, 4. Treatment (TTT) / Specific Antidote / Emergency management / Precautions). NEVER create long essay sub-questions (e.g. 'Explain the dual physiological mechanisms...').
-- Clear, concise, standard clinical exam questions without filler.
 
-For every case use standard Markdown headings (do NOT use > [!TIP] blockquotes):
-### Clinical Case N with evidence-backed badge(s)
-**Scenario:** concise clinical scenario
-**Questions:**
-1. What is the most likely diagnosis?
-2. What is the differential diagnosis (DDx) / characteristic clinical feature?
-3. Mention key diagnostic investigations.
-4. Outline the lines of treatment (TTT) / antidote.
-**Model Answer:**
-1. **Diagnosis:**
-   - Concise keyword answer (1 to 5 words)
-2. **DDx / Clinical Picture:**
-   - Concise keyword 1
-   - Concise keyword 2
-3. **Investigations:**
-   - Concise keyword
-4. **Treatment (TTT):**
-   - Concise keyword 1
-   - Concise keyword 2
-**Clinical Explanation:** Egyptian Arabic explanation covering comprehensive clinical reasoning, why specific signs are pathognomonic, and key points emphasized by the doctor.
 
-Model Answer must be in English only and strictly ULTRA-CONCISE keywords or short phrases (Egyptian exam marking scheme style, 1 to 5 words per point). NEVER write long sentences, descriptive narratives, or paragraphs inside Model Answer. Put all detailed medical explanations and lecture context exclusively in **Clinical Explanation** (in Egyptian Arabic).
 
-A case carrying a Past Exams or Question Bank badge must also contain
-**Source:** with the exact source name and verified year.
 
-{badge_instructions}
-Use a past-exam or question-bank badge only for a verbatim or traceably adapted
-cited scenario. Otherwise use exactly **[IMP]** only when the recording supports
-the emphasis. Never leave either side of a badge unbolded. Return section body
-only; never use # or ## headings."""
+
 
 
 def _body_heading_errors(text: str) -> list[str]:
@@ -5108,7 +4637,7 @@ def validate_mcqs(
     query_result: QueryResult,
     evidence: QuestionEvidence,
 ) -> list[str]:
-    if query_result.answer.strip() == NO_MCQS:
+    if is_empty_sentinel(query_result.answer, NO_MCQS):
         return []
     answer = query_result.answer
     errors = _body_heading_errors(answer)
@@ -5139,10 +4668,65 @@ def validate_mcqs(
         query_result, evidence.evidence_sources
     ):
         errors.append("MCQ citations do not include an exam/question-bank source")
-    if _has_combined_imp_badge(answer) and not _citations_include(
-        query_result, list(evidence.recording_sources)
-    ):
-        errors.append("MCQ combined Past Exams/IMP item lacks recording evidence")
+    errors += _combined_badge_recording_errors(
+        answer, "MCQ", query_result, evidence
+    )
+    return errors
+
+
+def _block_names_the_recording(
+    block: str, evidence: QuestionEvidence
+) -> bool:
+    """True when the block cites the lecture recording in a **Source:** field.
+
+    The field is not taken on trust: it has to resolve to an available catalog
+    entry whose role is ``recording``, or to one of this run's recording
+    sources.  Before the catalog was rebuilt after authority resolution the
+    recording was never available, which made the combined
+    ``[Past Exams (YYYY) / IMP]`` badge impossible to satisfy either way.
+    """
+    recording_names = [name for name in evidence.recording_sources if name]
+    for source_field in _source_fields(block):
+        if any(
+            _source_name_matches(source_field, expected)
+            for expected in recording_names
+        ):
+            return True
+        if any(
+            entry.get("role") == "recording"
+            for entry in _catalog_matches(source_field, evidence.evidence_catalog)
+            if _catalog_entry_is_available(entry)
+        ):
+            return True
+    return False
+
+
+def _combined_badge_recording_errors(
+    answer: str,
+    heading_prefix: str,
+    query_result: QueryResult,
+    evidence: QuestionEvidence,
+) -> list[str]:
+    """A combined Past Exams/IMP badge claims the doctor stressed the item.
+
+    That claim needs recording evidence: either NotebookLM cited the recording
+    for the whole answer, or the individual block names it as a source.
+    """
+    if not _has_combined_imp_badge(answer):
+        return []
+    if _citations_include(query_result, list(evidence.recording_sources)):
+        return []
+    errors: list[str] = []
+    for block in _section_blocks(answer, heading_prefix):
+        if not _has_combined_imp_badge(block):
+            continue
+        if _block_names_the_recording(block, evidence):
+            continue
+        number = _question_number(block, heading_prefix)
+        errors.append(
+            f"{heading_prefix} {number} [missing_recording_evidence]: the combined "
+            "Past Exams/IMP badge needs the recording cited or named in **Source:**"
+        )
     return errors
 
 
@@ -5165,7 +4749,7 @@ def validate_written(
     query_result: QueryResult,
     evidence: QuestionEvidence,
 ) -> list[str]:
-    if query_result.answer.strip() == NO_WRITTEN:
+    if is_empty_sentinel(query_result.answer, NO_WRITTEN):
         return []
     answer = query_result.answer
     errors = _body_heading_errors(answer)
@@ -5191,10 +4775,9 @@ def validate_written(
     )
     errors += _long_model_answer_errors(answer, 2_000)
     errors += _written_editorial_errors(answer)
-    if _has_combined_imp_badge(answer) and not _citations_include(
-        query_result, list(evidence.recording_sources)
-    ):
-        errors.append("Written combined Past Exams/IMP item lacks recording evidence")
+    errors += _combined_badge_recording_errors(
+        answer, "Question", query_result, evidence
+    )
     if "**[IMP]**" not in answer and not _citations_include(
         query_result, evidence.evidence_sources
     ):
@@ -5329,19 +4912,6 @@ def validate_cases(
     return errors + _long_case_answer_errors(answer)
 
 
-def format_markdown_tables(text: str) -> str:
-    lines = text.splitlines()
-    output: list[str] = []
-    for line in lines:
-        if (
-            line.strip().startswith("|")
-            and output
-            and output[-1].strip()
-            and not output[-1].strip().startswith("|")
-        ):
-            output.append("")
-        output.append(line.rstrip())
-    return "\n".join(output).strip()
 
 
 def clean_notebooklm_phrases(text: str) -> str:
@@ -5351,8 +4921,8 @@ def clean_notebooklm_phrases(text: str) -> str:
         r"Internal request marker: USTE-[0-9a-f]+[^\n]*",
         r"Studio Panel",
         r"Audio Overview",
-        r"(?m)^\s*(?:[👁️📊🎧🔍💡📝]|\\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
-        r"(?m)^---\s*\n+\s*(?:[👁️📊🎧🔍💡📝]|\\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
+        r"(?m)^\s*(?:[👁️📊🎧🔍💡📝]+|\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
+        r"(?m)^---\s*\n+\s*(?:[👁️📊🎧🔍💡📝]+|\*+)?\s*(?:أنا جاهز|تحب نعمل|حابب نجهز|تحب أعمل|Would you like|Do you want|Let me know if|Feel free to ask)[^\n]*$",
     )
     cleaned = text
     for pattern in patterns:
@@ -5368,7 +4938,18 @@ def clean_notebooklm_phrases(text: str) -> str:
 
 
 def _replace_empty_sentinel(text: str, sentinel: str, message: str) -> str:
-    return f"> [!NOTE]\n> {message}" if text.strip() == sentinel else text
+    """Turn the no-content sentinel into a reader-facing note.
+
+    A reason supplied by the model is kept so the reader -- and the next run --
+    can see why the section is empty instead of guessing.
+    """
+    if not is_empty_sentinel(text, sentinel):
+        return text
+    reason = empty_sentinel_reason(text, sentinel)
+    note = f"> [!NOTE]\n> {message}"
+    if reason:
+        note += "\n>\n> " + reason.replace("\n", "\n> ")
+    return note
 
 
 def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
@@ -5382,9 +4963,13 @@ def _clean_generated_sections(sections: GeneratedSections) -> list[str]:
             sections.cases,
         )
     ]
-    if cleaned_sections[2].strip() and cleaned_sections[2].strip() != NO_MCQS:
+    if cleaned_sections[2].strip() and not is_empty_sentinel(
+        cleaned_sections[2], NO_MCQS
+    ):
         cleaned_sections[2] = deduplicate_question_section(cleaned_sections[2], "MCQ")
-    if cleaned_sections[3].strip() and cleaned_sections[3].strip() != NO_WRITTEN:
+    if cleaned_sections[3].strip() and not is_empty_sentinel(
+        cleaned_sections[3], NO_WRITTEN
+    ):
         cleaned_sections[3] = deduplicate_question_section(cleaned_sections[3], "Question")
     if cleaned_sections[4].strip():
         cleaned_cases = []
@@ -5588,172 +5173,41 @@ def validate_final_document(text: str, verified_years: set[int]) -> None:
         raise ValidationError("Final document validation failed: " + "; ".join(errors))
 
 
-def _index_row(identity: TranscriptIdentity, target: OutputTarget) -> str:
-    encoded_name = urllib.parse.quote(target.file_name, safe="/")
-    return (
-        f"| {identity.emoji} {identity.title} | [فتح التفريغ](./{encoded_name}) | "
-        "شاملة الدليل الزمني وIMP Points وMCQs والأسئلة التحريرية "
-        "والحالات السريرية |\n"
-    )
 
 
-def _new_index(identity: TranscriptIdentity) -> str:
-    return (
-        f"# 📚 فهرس Transcripts محاضرات مادة ({identity.subject})\n\n"
-        "| اسم المحاضرة | رابط التفريغ | الملاحظات |\n"
-        "| :--- | :--- | :--- |\n"
-        "---\n*تم توليد وتحديث هذا الفهرس تلقائياً عبر "
-        "Universal Transcriber Engine.*\n"
-    )
 
 
-def _index_with_row(index_content: str, new_row: str) -> str:
-    lines = index_content.splitlines(keepends=True)
-    insert_at = next(
-        (index for index, line in enumerate(lines) if line.strip().startswith("---")),
-        len(lines),
-    )
-    lines.insert(insert_at, new_row)
-    return format_markdown_tables("".join(lines)) + "\n"
 
 
-def render_index_content(
-    identity: TranscriptIdentity, target: OutputTarget
-) -> tuple[str, str]:
-    index_path = os.path.join(target.transcripts_dir, "Index.md")
-    new_row = _index_row(identity, target)
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as index_file:
-            index_content = index_file.read()
-    else:
-        index_content = _new_index(identity)
-    encoded_name = urllib.parse.quote(target.file_name, safe="/")
-    if target.file_name in index_content or encoded_name in index_content:
-        return index_path, format_markdown_tables(index_content) + "\n"
-    return index_path, _index_with_row(index_content, new_row)
 
 
-def _prepare_temp(path: str, content: bytes) -> str:
-    directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
-    descriptor, temp_path = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as temp_file:
-            temp_file.write(content)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-    except OSError:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-        raise
-    return temp_path
 
 
-def _prepared_targets(targets: dict[str, bytes]) -> dict[str, str]:
-    prepared_paths: dict[str, str] = {}
-    try:
-        for path, content in targets.items():
-            prepared_paths[path] = _prepare_temp(path, content)
-    except OSError:
-        _remove_prepared_files(prepared_paths)
-        raise
-    return prepared_paths
 
 
-def _remove_prepared_files(prepared_paths: dict[str, str]) -> None:
-    for temp_path in prepared_paths.values():
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
 
 
-def _restore_replaced_files(
-    replaced: list[str], previous: dict[str, bytes | None]
-) -> list[str]:
-    restoration_errors: list[str] = []
-    for path in reversed(replaced):
-        try:
-            old_content = previous[path]
-            if old_content is None:
-                if os.path.exists(path):
-                    os.unlink(path)
-            else:
-                os.replace(_prepare_temp(path, old_content), path)
-        except OSError as restoration_error:  # pragma: no cover - catastrophic I/O
-            restoration_errors.append(f"{path}: {restoration_error}")
-    return restoration_errors
 
 
-def _existing_target_contents(targets: dict[str, bytes]) -> dict[str, bytes | None]:
-    return {
-        path: Path(path).read_bytes() if os.path.exists(path) else None
-        for path in targets
-    }
 
 
-def commit_transcript_and_index(
-    output_path: str, transcript: str, index_path: str, index_content: str
-) -> None:
-    targets = {
-        output_path: transcript.encode("utf-8"),
-        index_path: index_content.encode("utf-8"),
-    }
-    previous = _existing_target_contents(targets)
-    try:
-        prepared = _prepared_targets(targets)
-    except OSError as error:
-        raise TranscriberError(f"Atomic output preparation failed: {error}") from error
-    replaced: list[str] = []
-    try:
-        for path in targets:
-            os.replace(prepared[path], path)
-            replaced.append(path)
-        prepared.clear()
-    except OSError as error:
-        restoration_errors = _restore_replaced_files(replaced, previous)
-        detail = (
-            f"; restoration failed for {', '.join(restoration_errors)}"
-            if restoration_errors
-            else ""
-        )
-        raise TranscriberError(f"Atomic output commit failed: {error}{detail}") from error
-    finally:
-        _remove_prepared_files(prepared)
 
 
-def commit_managed_transcript(
-    identity: TranscriptIdentity, target: OutputTarget, transcript: str
-) -> str:
-    lock_path = Path(target.transcripts_dir) / ".transcriber-index.lock"
-    with _exclusive_file_lock(lock_path):
-        index_path, index_content = render_index_content(identity, target)
-        commit_transcript_and_index(
-            target.output_path,
-            transcript,
-            index_path,
-            index_content,
-        )
-    return index_path
 
 
-def _delete_review_draft(draft_path: str) -> None:
-    try:
-        Path(draft_path).unlink()
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        raise TranscriberError(
-            f"Final transcript committed but draft cleanup failed: {draft_path}: {error}"
-        ) from error
 
 
 def _argument_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Universal Subject Transcriber Engine")
     parser.add_argument(
         "--subject",
-        default=config.get("default_subject", "Toxicology"),
-        help="Subject/Course name",
+        default=config.get("default_subject") or "",
+        required=not (config.get("default_subject") or ""),
+        help=(
+            "Subject/Course name. The launcher supplies the module's display "
+            "name; set default_subject in config.json to run the engine "
+            "directly without it."
+        ),
     )
     parser.add_argument(
         "--agent-reviewed",
@@ -6122,7 +5576,7 @@ def _run_mcq_query(
     )
 
 
-def _query_mcqs(context: PipelineContext) -> QueryResult:
+def _query_mcqs(context: PipelineContext, imp_section: str = "") -> QueryResult:
     print("   - [3/5] Running MCQs...")
     query_results: list[QueryResult] = []
     if context.assessment_source_scope.source_ids:
@@ -6142,7 +5596,7 @@ def _query_mcqs(context: PipelineContext) -> QueryResult:
         _run_mcq_query(
             context,
             build_imp_mcq_prompt(
-                context.identity.title, context.exam_style_profile
+                context.identity.title, context.exam_style_profile, imp_section
             ),
             context.guide_scope,
         )
@@ -6185,7 +5639,7 @@ def _run_written_query(
     )
 
 
-def _query_written(context: PipelineContext) -> QueryResult:
+def _query_written(context: PipelineContext, imp_section: str = "") -> QueryResult:
     print("   - [4/5] Running Written Questions...")
     query_results: list[QueryResult] = []
     if context.assessment_source_scope.source_ids:
@@ -6205,7 +5659,7 @@ def _query_written(context: PipelineContext) -> QueryResult:
         _run_written_query(
             context,
             build_imp_written_prompt(
-                context.identity.title, context.exam_style_profile
+                context.identity.title, context.exam_style_profile, imp_section
             ),
             context.guide_scope,
         )
@@ -6684,12 +6138,16 @@ def _apply_agent_recovery(request: RunRequest, context: PipelineContext) -> None
     print(f"[Recovery] Agent repair accepted for {PHASE_LABELS[phase]}")
 
 
-def _phase_query_functions(context: PipelineContext) -> dict[str, Callable[[], QueryResult]]:
+def _phase_query_functions(
+    context: PipelineContext,
+    imp_section: Callable[[], str] | None = None,
+) -> dict[str, Callable[[], QueryResult]]:
+    emphasis = imp_section or (lambda: "")
     return {
         "guide": lambda: _query_guide(context),
         "imp": lambda: _query_imp(context),
-        "mcqs": lambda: _query_mcqs(context),
-        "written": lambda: _query_written(context),
+        "mcqs": lambda: _query_mcqs(context, emphasis()),
+        "written": lambda: _query_written(context, emphasis()),
         "cases": lambda: _query_cases(context),
     }
 
@@ -6834,16 +6292,43 @@ def _run_checkpointed_phases(
 
     if pending_phases:
         checkpoint_lock = threading.Lock()
+        results_lock = threading.Lock()
+        # A phase whose result is already known -- reused from a checkpoint or
+        # not scheduled at all -- must never make a dependant wait.
+        phase_ready = {phase: threading.Event() for phase in PHASE_ORDER}
+        for phase in PHASE_ORDER:
+            if phase not in pending_phases:
+                phase_ready[phase].set()
+
+        def _phase_answer(phase: str) -> str:
+            with results_lock:
+                return results.get(phase, "")
+
+        def _await_dependencies(phase: str) -> None:
+            for dependency in PHASE_DEPENDENCIES.get(phase, ()):
+                if phase_ready[dependency].is_set():
+                    continue
+                print(
+                    f"   - {PHASE_LABELS[phase]} waiting for "
+                    f"{PHASE_LABELS[dependency]}..."
+                )
+                phase_ready[dependency].wait(PHASE_DEPENDENCY_TIMEOUT_SECONDS)
 
         def _execute_phase_worker(phase: str) -> tuple[str, str | None, Exception | None]:
             nonlocal context
-            query_func = _phase_query_functions(context)[phase]
+            _await_dependencies(phase)
+            query_func = _phase_query_functions(
+                context, lambda: _phase_answer("imp")
+            )[phase]
             replacement_rounds = 0
             while True:
                 try:
                     query_result = _run_phase_query(
                         phase, query_func, run_dir, checkpoint, checkpoint_lock
                     )
+                    with results_lock:
+                        results[phase] = query_result.answer
+                    phase_ready[phase].set()
                     return phase, query_result.answer, None
                 except PhaseValidationError as error:
                     if (
@@ -6866,7 +6351,9 @@ def _run_checkpointed_phases(
                                     checkpoint,
                                     phase,
                                 )
-                                query_func = _phase_query_functions(context)[phase]
+                                query_func = _phase_query_functions(
+                                    context, lambda: _phase_answer("imp")
+                                )[phase]
                             continue
                         except (TranscriberError, OSError) as recovery_error:
                             error = PhaseValidationError(
@@ -6879,11 +6366,13 @@ def _run_checkpointed_phases(
                     _record_phase_failure(
                         phase, error, run_dir, checkpoint, checkpoint_lock
                     )
+                    phase_ready[phase].set()
                     return phase, None, error
                 except Exception as error:
                     _record_phase_failure(
                         phase, error, run_dir, checkpoint, checkpoint_lock
                     )
+                    phase_ready[phase].set()
                     return phase, None, error
 
         max_workers = min(len(pending_phases), 5)
@@ -6899,7 +6388,8 @@ def _run_checkpointed_phases(
                     if not first_error:
                         first_error = error
                 elif answer is not None:
-                    results[phase] = answer
+                    with results_lock:
+                        results[phase] = answer
 
         if first_error:
             raise first_error
@@ -6914,6 +6404,45 @@ def _run_checkpointed_phases(
         written=results["written"],
         cases=results["cases"],
     )
+
+
+def report_question_coverage(
+    sources_root: str, sections: GeneratedSections, block: bool = False
+) -> list[str]:
+    """Compare what was extracted against what the exam papers actually hold.
+
+    This is an upper-bound measure -- extraction is scoped to one lecture's
+    topics, so a low ratio means "look at this", not "this is broken".  It
+    warns by default; ``question_coverage_blocks`` in config.json turns it
+    into a hard failure.
+    """
+    questions_dir = Path(sources_root) / "Questions"
+    if not questions_dir.is_dir():
+        return []
+    transcript = f"{sections.mcqs}\n\n{sections.written}"
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".md", encoding="utf-8", delete=False
+    ) as handle:
+        handle.write(transcript)
+        transcript_path = Path(handle.name)
+    try:
+        report = build_question_coverage_report(questions_dir, transcript_path)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"[!] Question coverage could not be measured: {error}")
+        return []
+    finally:
+        transcript_path.unlink(missing_ok=True)
+    print(
+        f"[Coverage] MCQs {report.extracted_mcqs}/{report.available_mcqs} "
+        f"({report.mcq_coverage:.0%}); written {report.extracted_written}/"
+        f"{report.available_written} ({report.written_coverage:.0%})"
+    )
+    warnings = report.below_floor
+    for message in warnings:
+        print(f"[!] {message}")
+    if warnings and block:
+        raise ValidationError("; ".join(warnings))
+    return warnings
 
 
 def _save_transcript(request: TranscriptSaveRequest) -> None:
@@ -6948,6 +6477,11 @@ def _run_pipeline(config: dict[str, Any], request: RunRequest) -> int:
     if request.recovery_response:
         _apply_agent_recovery(request, context)
     sections = _run_checkpointed_phases(request, context)
+    report_question_coverage(
+        request.sources_root,
+        sections,
+        bool(config.get("question_coverage_blocks", False)),
+    )
     if request.draft_only:
         _save_draft(
             assemble_document(identity, sections),
@@ -7021,6 +6555,7 @@ def main() -> int:
     if args.recovery_response and args.retry_phase:
         parser.error("Agent recovery cannot be combined with --retry-phase")
     request = _run_request(args, config, parser)
+    set_inventory_cache_root(request.sources_root)
     _print_run_summary(request)
     try:
         if request.audit_only:

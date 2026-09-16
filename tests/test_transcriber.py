@@ -1,6 +1,9 @@
 import importlib.util
+import inspect
+import io
 import json
 import multiprocessing
+import os
 import sys
 import tempfile
 import threading
@@ -2035,7 +2038,7 @@ class TranscriberTests(unittest.TestCase):
             )
             mcq_calls = 0
 
-            def query_mcqs(_context):
+            def query_mcqs(_context, _imp_section=""):
                 nonlocal mcq_calls
                 mcq_calls += 1
                 if mcq_calls == 1:
@@ -2482,6 +2485,590 @@ class TranscriberTests(unittest.TestCase):
         self.assertNotIn("> [!TIP]", normalized_case)
         self.assertIn("**Model Answer:**", normalized_case)
         self.assertNotIn("(Short)", normalized_case)
+
+
+class EvidenceCatalogAuthorityTests(unittest.TestCase):
+    """Regressions for the catalog being built before the authority resolved."""
+
+    def _report(self):
+        report = phase0_report(
+            [
+                local_source("Questions/End 2022.pdf", "past_exam"),
+                local_source("Lecture/notes.pdf", "reference"),
+            ],
+            [
+                remote_source("rec-1", "مبيد حشرى.m4a", "nb-1"),
+                remote_source("slide-1", "OPs.pptx", "nb-1"),
+                remote_source("slide-2", "OPs.pptx", "nb-1"),
+                remote_source("slide-3", "OPs.pptx", "nb-1"),
+                remote_source("other-1", "Unrelated lecture.mp3", "nb-1"),
+            ],
+        )
+        report.recording_sources = ()
+        report.recording_source = ""
+        report.slide_source = ""
+        return report
+
+    def test_catalog_built_before_authority_selects_nothing(self):
+        report = self._report()
+        catalog = engine.build_evidence_catalog(report)
+        selected = {
+            entry["canonical_name"]
+            for entry in catalog
+            if entry["selected_for_run"]
+        }
+        # Only assessment and reference material is selectable without an
+        # authority; the recording and the slides are not.
+        self.assertNotIn("مبيد حشرى.m4a", selected)
+        self.assertNotIn("OPs.pptx", selected)
+
+    def test_rebuilding_after_authority_selects_the_run_sources(self):
+        report = self._report()
+        report.recording_sources = ("مبيد حشرى.m4a",)
+        report.recording_source = "مبيد حشرى.m4a"
+        report.slide_source = "OPs.pptx"
+        engine._rebuild_evidence_catalog(report)
+        by_name = {
+            entry["canonical_name"]: entry for entry in report.evidence_catalog
+        }
+        self.assertTrue(by_name["مبيد حشرى.m4a"]["selected_for_run"])
+        self.assertTrue(by_name["OPs.pptx"]["selected_for_run"])
+        self.assertFalse(by_name["Unrelated lecture.mp3"]["selected_for_run"])
+        self.assertTrue(engine._catalog_entry_is_available(by_name["مبيد حشرى.m4a"]))
+        self.assertTrue(engine._catalog_entry_is_available(by_name["OPs.pptx"]))
+
+    def test_duplicate_remote_uploads_collapse_into_one_entry(self):
+        report = self._report()
+        report.slide_source = "OPs.pptx"
+        engine._rebuild_evidence_catalog(report)
+        slides = [
+            entry
+            for entry in report.evidence_catalog
+            if entry["canonical_name"] == "OPs.pptx"
+        ]
+        self.assertEqual(len(slides), 1)
+        self.assertEqual(
+            sorted(slides[0]["source_ids"]), ["slide-1", "slide-2", "slide-3"]
+        )
+        # Ambiguous once merged, so no single id is promoted.
+        self.assertEqual(slides[0]["source_id"], "")
+        self.assertEqual(slides[0]["notebook_id"], "nb-1")
+
+    def test_local_entries_state_selected_for_run_explicitly(self):
+        report = self._report()
+        engine._rebuild_evidence_catalog(report)
+        local_entries = [
+            entry
+            for entry in report.evidence_catalog
+            if entry["content_status"] == "local_only"
+        ]
+        self.assertTrue(local_entries)
+        for entry in local_entries:
+            self.assertIn("selected_for_run", entry)
+            self.assertIsInstance(entry["selected_for_run"], bool)
+
+    def test_phase0_entry_points_rebuild_after_resolving_authority(self):
+        for runner, resolver in (
+            (engine.run_phase0_sync, "_resolve_remote_authority"),
+            (engine.run_phase0_audit, "_resolve_audit_authority"),
+        ):
+            source = inspect.getsource(runner)
+            self.assertIn(resolver, source)
+            self.assertLess(
+                source.index(resolver),
+                source.index("_rebuild_evidence_catalog"),
+                f"{runner.__name__} must rebuild the catalog after {resolver}",
+            )
+
+
+class CombinedBadgeRecordingEvidenceTests(unittest.TestCase):
+    """A combined Past Exams/IMP badge must be reachable, not a deadlock."""
+
+    ANSWER = (
+        "### MCQ 1 **[Past Exams (2022) / IMP]**\n\n"
+        "**Question:** Atropine is used as an antidote in:\n"
+        "**Options:**\n"
+        "a. Organophosphates.\n"
+        "b. Opium.\n"
+        "c. Iron.\n"
+        "d. Lead.\n"
+        "**Correct Answer:** a. Organophosphates.\n"
+        "**Source:** مبيد حشرى.m4a and End 2022.pdf\n"
+        "**Clinical Explanation (Egyptian Arabic):** الأتروبين هو الترياق النوعي لتسمم المبيدات الفوسفورية وبيقفل الريسبتور المسكاريني."
+    )
+
+    def _evidence(self, recording_selected: bool):
+        catalog = [
+            {
+                "canonical_name": "End 2022.pdf",
+                "normalized_name": engine.normalize_source_key("End 2022.pdf"),
+                "aliases": ["End 2022.pdf"],
+                "role": "past_exam",
+                "verified_years": [2022],
+                "content_status": "available",
+                "selected_for_run": True,
+            },
+            {
+                "canonical_name": "مبيد حشرى.m4a",
+                "normalized_name": engine.normalize_source_key("مبيد حشرى.m4a"),
+                "aliases": ["مبيد حشرى.m4a"],
+                "role": "recording",
+                "verified_years": [],
+                "content_status": "remote_only",
+                "selected_for_run": recording_selected,
+            },
+        ]
+        return engine.QuestionEvidence(
+            {2022: ["End 2022.pdf"]},
+            ["End 2022.pdf"],
+            evidence_catalog=catalog,
+            recording_sources=("مبيد حشرى.m4a",),
+        )
+
+    def test_named_recording_source_satisfies_the_combined_badge(self) -> None:
+        result = engine.QueryResult(self.ANSWER, source_names=("End 2022.pdf",))
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=True))
+
+        self.assertEqual(errors, [])
+
+    def test_unavailable_recording_reproduces_the_old_deadlock(self) -> None:
+        # This is the pre-fix state: the recording is in the catalog but not
+        # selected for the run, so naming it cannot rescue the badge.
+        result = engine.QueryResult(self.ANSWER, source_names=("End 2022.pdf",))
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=False))
+
+        self.assertTrue(any("unknown_source" in error for error in errors))
+
+    def test_citations_alone_still_satisfy_the_combined_badge(self) -> None:
+        answer = self.ANSWER.replace(
+            "**Source:** مبيد حشرى.m4a and End 2022.pdf\n", "**Source:** End 2022.pdf\n"
+        )
+        result = engine.QueryResult(
+            answer, source_names=("End 2022.pdf", "مبيد حشرى.m4a")
+        )
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=True))
+
+        self.assertEqual(errors, [])
+
+    def test_no_recording_evidence_is_reported_per_question(self) -> None:
+        answer = self.ANSWER.replace(
+            "**Source:** مبيد حشرى.m4a and End 2022.pdf\n", "**Source:** End 2022.pdf\n"
+        )
+        result = engine.QueryResult(answer, source_names=("End 2022.pdf",))
+
+        errors = engine.validate_mcqs(result, self._evidence(recording_selected=True))
+
+        self.assertTrue(
+            any("MCQ 1 [missing_recording_evidence]" in error for error in errors),
+            errors,
+        )
+
+
+class RemoteInventoryCacheTests(unittest.TestCase):
+    """The launcher runs phase 0 twice per invocation, in two processes."""
+
+    def setUp(self) -> None:
+        self.addCleanup(engine.set_inventory_cache_root, None)
+
+    def test_second_process_reuses_the_cached_inventory(self) -> None:
+        inventory = {"sources": [{"id": "s1", "title": "OPs.pptx"}]}
+        with tempfile.TemporaryDirectory() as root:
+            engine.set_inventory_cache_root(root)
+            with patch.object(
+                engine, "_run_nlm_json", return_value=inventory
+            ) as run_nlm:
+                first = engine._remote_source_inventory("nb-1", {})
+            self.assertEqual(run_nlm.call_count, 1)
+
+            # A separate process would re-read the same cache directory.
+            engine.set_inventory_cache_root(root)
+            with patch.object(engine, "_run_nlm_json") as run_nlm:
+                second = engine._remote_source_inventory("nb-1", {})
+            run_nlm.assert_not_called()
+            self.assertEqual(first, second)
+
+    def test_expired_entries_are_refetched(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine.set_inventory_cache_root(root)
+            with patch.object(engine, "_run_nlm_json", return_value={"sources": []}):
+                engine._remote_source_inventory("nb-1", {})
+            with patch.dict(
+                os.environ, {"TRANSCRIBER_INVENTORY_CACHE_TTL": "0"}, clear=False
+            ):
+                with patch.object(
+                    engine, "_run_nlm_json", return_value={"sources": []}
+                ) as run_nlm:
+                    engine._remote_source_inventory("nb-1", {})
+                self.assertEqual(run_nlm.call_count, 1)
+
+    def test_mutating_nlm_calls_drop_the_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine.set_inventory_cache_root(root)
+            with patch.object(engine, "_run_nlm_json", return_value={"sources": []}):
+                engine._remote_source_inventory("nb-1", {})
+            self.assertIsNotNone(engine._read_cached_inventory("nb-1"))
+
+            completed = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+            with patch.object(engine.subprocess, "run", return_value=completed):
+                with patch.object(
+                    engine, "_find_nlm_executable", return_value="nlm"
+                ):
+                    engine._run_nlm_json(
+                        {}, ["source", "add", "nb-1", "f.pdf"], 10, "nlm source add"
+                    )
+            self.assertIsNone(engine._read_cached_inventory("nb-1"))
+
+    def test_the_cache_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with patch.dict(
+                os.environ,
+                {"TRANSCRIBER_DISABLE_INVENTORY_CACHE": "1"},
+                clear=False,
+            ):
+                engine.set_inventory_cache_root(root)
+            with patch.object(
+                engine, "_run_nlm_json", return_value={"sources": []}
+            ) as run_nlm:
+                engine._remote_source_inventory("nb-1", {})
+                engine._remote_source_inventory("nb-1", {})
+            self.assertEqual(run_nlm.call_count, 2)
+
+
+class PhaseAttemptReportingTests(unittest.TestCase):
+    """The retry loop usually stops at attempt 1; the message said 3."""
+
+    def test_early_exit_reports_the_attempt_actually_spent(self) -> None:
+        error = engine.PhaseValidationError("MCQs", ["bad badge"], attempts=1)
+
+        self.assertIn("failed on 1 attempt of 3", str(error))
+        self.assertIn("stopped early for Agent repair", str(error))
+
+    def test_exhausted_retries_still_report_the_maximum(self) -> None:
+        error = engine.PhaseValidationError(
+            "MCQs", ["bad badge"], attempts=engine.MAX_ATTEMPTS, exhausted=True
+        )
+
+        self.assertIn(f"failed after {engine.MAX_ATTEMPTS} attempts", str(error))
+
+    def test_non_query_failures_claim_no_attempts(self) -> None:
+        error = engine.PhaseValidationError("MCQs", ["bad badge"])
+
+        self.assertIn("MCQs failed:", str(error))
+        self.assertNotIn("attempt", str(error))
+
+
+class ImpQuestionPromptTests(unittest.TestCase):
+    """The IMP prompts returned NO_MCQS despite 274 lines of IMP Points."""
+
+    IMP_SECTION = "\n".join(
+        [
+            "#### 🎯 Doctor Emphasis",
+            *[f"- Emphasised point {index}." for index in range(1, 19)],
+            "#### ⚠️ Diagnostic Traps",
+            "> [!WARNING]",
+            "> - Do not miss the muscarinic signs.",
+        ]
+    )
+
+    def test_emphasis_points_are_counted_not_headings(self) -> None:
+        self.assertEqual(engine.emphasis_point_count(self.IMP_SECTION), 19)
+
+    def test_an_empty_section_counts_nothing(self) -> None:
+        self.assertEqual(engine.emphasis_point_count(""), 0)
+        self.assertEqual(engine.emphasis_point_count("#### Only a heading"), 0)
+
+    def test_the_prompt_carries_the_verified_section(self) -> None:
+        prompt = engine.build_imp_mcq_prompt("OPs", {}, self.IMP_SECTION)
+
+        self.assertIn("<imp_points>", prompt)
+        self.assertIn("Emphasised point 1.", prompt)
+        self.assertIn("19 emphasized point(s)", prompt)
+
+    def test_the_prompt_asks_for_a_minimum_tied_to_the_section_size(self) -> None:
+        prompt = engine.build_imp_mcq_prompt("OPs", {}, self.IMP_SECTION)
+
+        self.assertIn(f"at least {engine._emphasis_minimum(19)} item(s)", prompt)
+
+    def test_the_sentinel_now_requires_a_written_reason(self) -> None:
+        for builder, sentinel in (
+            (engine.build_imp_mcq_prompt, engine.NO_MCQS),
+            (engine.build_imp_written_prompt, engine.NO_WRITTEN),
+        ):
+            prompt = builder("OPs", {}, self.IMP_SECTION)
+
+            self.assertIn(f"Returning {sentinel} is only acceptable", prompt)
+            self.assertIn("Silence is not an acceptable answer", prompt)
+
+    def test_without_a_section_the_prompt_still_demands_a_reason(self) -> None:
+        prompt = engine.build_imp_mcq_prompt("OPs", {}, "")
+
+        self.assertNotIn("<imp_points>", prompt)
+        self.assertIn("followed by one sentence naming what was missing", prompt)
+
+    def test_the_question_phases_depend_on_the_imp_phase(self) -> None:
+        self.assertEqual(engine.PHASE_DEPENDENCIES["mcqs"], ("imp",))
+        self.assertEqual(engine.PHASE_DEPENDENCIES["written"], ("imp",))
+        self.assertNotIn("guide", engine.PHASE_DEPENDENCIES)
+
+
+class EmptySentinelTests(unittest.TestCase):
+    """A refusal now carries a reason, which must not read as malformed."""
+
+    def test_a_bare_sentinel_is_still_recognised(self) -> None:
+        self.assertTrue(engine.is_empty_sentinel(engine.NO_MCQS, engine.NO_MCQS))
+
+    def test_a_sentinel_with_a_reason_is_recognised(self) -> None:
+        answer = f"{engine.NO_MCQS}\nNone of the 19 points is testable as an MCQ."
+
+        self.assertTrue(engine.is_empty_sentinel(answer, engine.NO_MCQS))
+        self.assertEqual(
+            engine.empty_sentinel_reason(answer, engine.NO_MCQS),
+            "None of the 19 points is testable as an MCQ.",
+        )
+
+    def test_a_real_section_is_not_a_sentinel(self) -> None:
+        self.assertFalse(
+            engine.is_empty_sentinel("### MCQ 1 **[IMP]**", engine.NO_MCQS)
+        )
+
+    def test_validators_accept_a_justified_refusal(self) -> None:
+        answer = f"{engine.NO_MCQS}\nThe recording emphasised no testable point."
+
+        self.assertEqual(
+            engine.validate_mcqs(
+                engine.QueryResult(answer), engine.QuestionEvidence({}, [])
+            ),
+            [],
+        )
+
+    def test_the_reason_reaches_the_reader(self) -> None:
+        answer = f"{engine.NO_MCQS}\nNo emphasised point carries four options."
+
+        note = engine._replace_empty_sentinel(answer, engine.NO_MCQS, "لا توجد أسئلة.")
+
+        self.assertIn("> [!NOTE]", note)
+        self.assertIn("لا توجد أسئلة.", note)
+        self.assertIn("No emphasised point carries four options.", note)
+
+
+class UnclassifiedQuestionSourceTests(unittest.TestCase):
+    """A whole run used to fail because three files were left unclassified."""
+
+    def _scan(self, names, assessment_sources):
+        with tempfile.TemporaryDirectory() as root:
+            questions = Path(root) / "Questions"
+            questions.mkdir()
+            for name in names:
+                (questions / name).write_bytes(b"%PDF-1.4")
+            with patch.object(engine, "verify_document_text"):
+                return engine.scan_local_sources(
+                    root,
+                    assessment_sources,
+                    require_assessment_manifest=True,
+                )
+
+    def test_a_yearless_file_defaults_to_question_bank(self) -> None:
+        sources = self._scan(
+            ["Khalsa questions of toxo.pdf"],
+            [{"path": "Questions/Khalsa questions of toxo.pdf", "type": "question_bank"}],
+        )
+        unclassified = self._scan(
+            ["Khalsa questions of toxo.pdf", "Random bank.pdf"],
+            [{"path": "Questions/Khalsa questions of toxo.pdf", "type": "question_bank"}],
+        )
+
+        self.assertEqual(len(sources), 1)
+        roles = {source.name: source.role for source in unclassified}
+        self.assertEqual(roles["Random bank.pdf"], "question_bank")
+
+    def test_a_defaulted_file_claims_no_exam_year(self) -> None:
+        sources = self._scan(
+            ["Random bank.pdf"],
+            [{"path": "Questions/Random bank.pdf", "type": "question_bank"}],
+        )
+        defaulted = self._scan(
+            ["Random bank.pdf", "Khalsa questions.pdf"],
+            [{"path": "Questions/Khalsa questions.pdf", "type": "question_bank"}],
+        )
+        defaulted = [s for s in defaulted if s.name == "Random bank.pdf"]
+
+        self.assertEqual(sources[0].years, ())
+        self.assertEqual(defaulted[0].years, ())
+
+    def test_a_year_bearing_file_is_still_a_hard_stop(self) -> None:
+        with self.assertRaises(engine.Phase0Error) as caught:
+            self._scan(
+                ["End 2022.pdf", "Khalsa questions.pdf"],
+                [{"path": "Questions/Khalsa questions.pdf", "type": "question_bank"}],
+            )
+
+        self.assertIn("year-bearing", str(caught.exception))
+        self.assertIn("end 2022.pdf", str(caught.exception).casefold())
+
+    def test_two_digit_years_count_as_year_bearing(self) -> None:
+        self.assertTrue(engine._path_claims_a_year("questions/Final 21.pdf"))
+        self.assertTrue(engine._path_claims_a_year("questions/End 2025.pdf"))
+        self.assertFalse(engine._path_claims_a_year("questions/Khalsa questions.pdf"))
+
+
+class LoadConfigTests(unittest.TestCase):
+    """A trailing comma used to silently discard the whole config file."""
+
+    def _load(self, contents: str | None):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "config.json"
+            if contents is not None:
+                path.write_text(contents, encoding="utf-8")
+            with patch.object(engine, "CONFIG_PATH", str(path)):
+                return engine.load_config()
+
+    def test_a_missing_file_yields_the_defaults(self) -> None:
+        self.assertEqual(self._load(None), engine.DEFAULT_CONFIG)
+
+    def test_a_valid_file_is_merged_over_the_defaults(self) -> None:
+        config = self._load('{"nlm_profile": "work"}')
+
+        self.assertEqual(config["nlm_profile"], "work")
+        self.assertEqual(config["modules_root"], "modules")
+
+    def test_broken_json_warns_instead_of_passing_silently(self) -> None:
+        stderr = io.StringIO()
+        with patch.object(sys, "stderr", stderr):
+            config = self._load('{"nlm_profile": "work",}')
+
+        self.assertIn("not valid JSON", stderr.getvalue())
+        self.assertIn("being ignored", stderr.getvalue())
+        self.assertEqual(config, engine.DEFAULT_CONFIG)
+
+    def test_a_non_object_payload_warns(self) -> None:
+        stderr = io.StringIO()
+        with patch.object(sys, "stderr", stderr):
+            config = self._load("[1, 2, 3]")
+
+        self.assertIn("must contain a JSON object", stderr.getvalue())
+        self.assertEqual(config, engine.DEFAULT_CONFIG)
+
+    def test_no_subject_is_hardcoded(self) -> None:
+        self.assertEqual(engine.DEFAULT_CONFIG["default_subject"], "")
+
+
+class SlicedQueryMergeTests(unittest.TestCase):
+    """A phase with more sources than the cap is queried in slices.
+
+    Each slice answers the same question about the same lecture, so the
+    narrative phases came back duplicated -- the OPs guide arrived at double
+    length with 28 of its 30 sections repeated verbatim.
+    """
+
+    GUIDE_SLICE = (
+        "### Introduction\n\nThe doctor opens with pesticide classification.\n\n"
+        "### The Miosis Trap\n\nAbsence of miosis does not exclude poisoning.\n"
+    )
+
+    def _merge(self, answers, phase_name):
+        return engine._merge_answer_bodies(
+            [engine.QueryResult(answer) for answer in answers], phase_name
+        )
+
+    def test_identical_guide_slices_collapse(self) -> None:
+        merged = self._merge([self.GUIDE_SLICE, self.GUIDE_SLICE], "Chronological Guide")
+
+        self.assertEqual(merged.count("### Introduction"), 1)
+        self.assertEqual(merged.count("### The Miosis Trap"), 1)
+
+    def test_distinct_guide_sections_are_all_kept(self) -> None:
+        second = self.GUIDE_SLICE + "\n### Atropinization\n\nNo maximum dose.\n"
+
+        merged = self._merge([self.GUIDE_SLICE, second], "Chronological Guide")
+
+        for heading in ("### Introduction", "### The Miosis Trap", "### Atropinization"):
+            self.assertEqual(merged.count(heading), 1, heading)
+
+    def test_whitespace_differences_do_not_defeat_the_match(self) -> None:
+        spaced = self.GUIDE_SLICE.replace("\n\n", "\n\n\n")
+
+        merged = self._merge([self.GUIDE_SLICE, spaced], "Chronological Guide")
+
+        self.assertEqual(merged.count("### Introduction"), 1)
+
+    def test_question_phases_still_concatenate_and_renumber(self) -> None:
+        first = "### MCQ 1 **[IMP]**\n\n**Question:** One?\n"
+        second = "### MCQ 1 **[IMP]**\n\n**Question:** Two?\n"
+
+        merged = self._merge([first, second], "MCQs")
+
+        self.assertIn("### MCQ 1", merged)
+        self.assertIn("### MCQ 2", merged)
+        self.assertIn("One?", merged)
+        self.assertIn("Two?", merged)
+
+    def test_imp_sections_do_not_repeat_a_point(self) -> None:
+        answer = (
+            f"{engine.IMP_HEADINGS[0]}\n- Atropine has no maximum dose.\n"
+            f"{engine.IMP_HEADINGS[1]}\n> [!WARNING]\n> - Miosis may be absent.\n"
+            f"{engine.IMP_HEADINGS[2]}\n> [!CAUTION]\n> - Do not delay atropine.\n"
+            f"{engine.IMP_HEADINGS[3]}\n- What is the first step?\n"
+            f"{engine.IMP_HEADINGS[4]}\n- Bring your booklet.\n"
+        )
+
+        merged = self._merge([answer, answer], "IMP Points")
+
+        self.assertEqual(merged.count("Atropine has no maximum dose."), 1)
+        self.assertEqual(merged.count("Miosis may be absent."), 1)
+
+    def test_a_guide_with_no_headings_survives_intact(self) -> None:
+        merged = self._merge(["Plain prose with no headings."], "Chronological Guide")
+
+        self.assertEqual(merged, "Plain prose with no headings.")
+
+
+class NotebookLmPhraseCleanupTests(unittest.TestCase):
+    """The trailing-offer stripper had a regex Python 3.10 refuses to compile.
+
+    `\\*+` is an escaped backslash followed by two quantifiers: a "multiple
+    repeat" error on 3.10, and an accidental possessive quantifier on 3.11+
+    that silently matched backslashes instead of the markdown asterisks it was
+    written for. The whole finalize step crashed on 3.10.
+    """
+
+    def test_a_bold_trailing_offer_is_stripped(self) -> None:
+        cleaned = engine.clean_notebooklm_phrases(
+            "محتوى مفيد\n\n**أنا جاهز أساعدك في أي حاجة تانية**\nسطر باقي"
+        )
+
+        self.assertNotIn("أنا جاهز", cleaned)
+        self.assertIn("محتوى مفيد", cleaned)
+        self.assertIn("سطر باقي", cleaned)
+
+    def test_an_emoji_prefixed_offer_is_stripped(self) -> None:
+        # "👁️" is two codepoints, so a single character-class match left the
+        # variation selector behind and the rest of the pattern never matched.
+        cleaned = engine.clean_notebooklm_phrases(
+            "👁️ Would you like me to continue?\nkeep me"
+        )
+
+        self.assertEqual(cleaned.strip(), "keep me")
+
+    def test_every_offer_emoji_is_handled(self) -> None:
+        for emoji in ("👁️", "📊", "🎧", "🔍", "💡", "📝"):
+            with self.subTest(emoji=emoji):
+                cleaned = engine.clean_notebooklm_phrases(
+                    f"{emoji} Do you want a summary?\nkeep me"
+                )
+
+                self.assertEqual(cleaned.strip(), "keep me")
+
+    def test_real_content_carrying_an_emoji_survives(self) -> None:
+        cleaned = engine.clean_notebooklm_phrases("normal 👁️ text stays")
+
+        self.assertIn("normal 👁️ text stays", cleaned)
+
+    def test_the_offer_patterns_compile(self) -> None:
+        """Guards the syntax itself, which only 3.10 rejected at runtime."""
+        engine.clean_notebooklm_phrases("")
 
 
 if __name__ == "__main__":

@@ -7,3 +7,7 @@
 
 # transcriber-anki: builds native .apkg decks. Without it only .tsv export works.
 genanki>=0.13,<1.0
+
+# universal-transcriber: renders plain-text question banks to PDF before
+# upload, since NotebookLM will not accept a .txt source.
+reportlab>=4.0,<5.0

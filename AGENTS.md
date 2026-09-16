@@ -59,6 +59,13 @@ Use these exact terms. Do not paraphrase or coin synonyms.
     - The pipeline shells out to `nlm`, poppler, `ocrmypdf`, LibreOffice, Ghostscript, and `ffmpeg`. When a run fails on a missing tool, run `run_transcription.py --doctor` and report the install hint to the user rather than guessing or working around the gap.
 14. **Cross-Platform File Locking**:
     - Never `import fcntl` directly. Use `exclusive_file_lock` from `skills/universal-transcriber/scripts/file_lock.py`, which keeps `flock` semantics on POSIX and falls back to `msvcrt` on Windows.
+15. **The Engine Is Being Split, One Module At A Time**:
+    - `universal_transcribe.py` is the entry point and the compatibility surface. Extracted modules are imported and **re-exported** from it, so every existing `universal_transcribe.<name>` keeps working. `tests/test_engine_contract.py` pins that surface — if an extraction drops a symbol, it fails and names it.
+    - Extracted so far, in dependency order (each imports only from the ones above it): `exam_years.py`, `file_lock.py`, `transcriber_models.py`, `document_verify.py`, `question_prompts.py`, `output_assembly.py`, `question_coverage.py`.
+    - Still inside the engine, hardest last: checkpoint/recovery, the phase validators, the nlm transport, and source authority. Extract one per change and run the full suite after each.
+    - Never add an import from an extracted module back into `universal_transcribe.py`'s namespace — that is the cycle the layering exists to prevent.
+16. **Exam Years Are Provenance**:
+    - Parse exam years only through `exam_years.py`. A `**[Past Exams - YYYY]**` badge is a claim that the question came from that year's paper; a year invented anywhere else in the code becomes a fabricated citation in a student's revision notes.
 
 ---
 
