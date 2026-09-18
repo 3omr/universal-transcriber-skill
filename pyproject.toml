@@ -47,7 +47,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.10"
-files = ["skills", "scripts", ".github/scripts"]
+files = ["skills", "scripts"]
 # The anki copies of these modules are byte-identical to the transcriber ones
 # (enforced by scripts/check-shared-files.sh), and mypy cannot resolve two
 # modules with the same name. Checking one of each pair checks both. Keep this
