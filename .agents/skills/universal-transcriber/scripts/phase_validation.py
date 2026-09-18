@@ -1028,7 +1028,11 @@ def _correct_answer_errors(
 ) -> list[str]:
     answer = _field_content(block, "Correct Answer")
     answer = re.sub(r"(?m)^[ \t]*>[ \t]?", "", answer).strip()
-    match = re.match(r"(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*", answer)
+    # The trailing (?:\*\*)? matters: "**d.** text" closes its bold *after* the
+    # period, so without it the "**" stays glued to the answer text and every
+    # correctly-written block reads as disagreeing with its own option.
+    # _option_entries has always consumed it; this is the same marker.
+    match = re.match(r"(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*(?:\*\*)?", answer)
     if not match:
         return [f"MCQ {block_number} Correct Answer must start with an option label"]
     option_entries = _option_entries(options)

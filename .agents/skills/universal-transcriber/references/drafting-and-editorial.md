@@ -9,12 +9,20 @@ Every lecture transcript must adhere to the 5-section academic standard. The Age
 Transcripts are written sequentially in five distinct sections:
 
 ```text
-1. 📖 Chronological Guide
-2. ⭐ High-Yield Summary & IMP Points
-3. ❓ Multiple Choice Questions (MCQs)
-4. 📝 Written Questions (Short & Long Form)
-5. 🏥 Clinical Cases
+## 📖 Chronological Guide
+## 🌟 IMP Points
+## ❓ MCQs
+## ✍️ Written Questions
+## 🩺 Clinical Cases
 ```
+
+> [!IMPORTANT]
+> These five strings are the contract, not a description of it. They are
+> `phase_validation.SECTION_HEADINGS` verbatim, and a finished transcript is
+> parsed by them — rename one and the question bank, exam mode and Anki export
+> stop seeing that section. Question headings are likewise fixed: `### MCQ N`
+> in the MCQs section, `### Question N` in Written Questions, and
+> `### Clinical Case N` in Clinical Cases.
 
 ---
 
@@ -32,23 +40,33 @@ Transcripts are written sequentially in five distinct sections:
 
 ---
 
-### Section 2: ⭐ High-Yield Summary & IMP Points
+### Section 2: 🌟 IMP Points
 
-Must contain the five canonical subsections:
-1. **Core Clinical Concepts**: High-yield pathophysiological and pharmacological mechanisms.
-2. **Golden Diagnostic Rules**: Definitive diagnostic criteria, pathognomonic signs, and investigation of choice.
-3. **Treatment Protocols & Red Flags**: First-line therapies, contraindications, and emergency management.
-4. **Classic Exam Traps & Differentials**: Key points where examiners try to confuse students.
-5. **High-Yield Summary Table**: Comparative markdown table summarizing clinical classifications, drugs, or toxic agents.
+Must contain **exactly these five `####` headings**, in this order and spelled
+this way — `phase_validation.IMP_HEADINGS` and the phase prompt both enforce it:
+
+```markdown
+#### 1. 📌 Doctor's Spoken Pearls
+#### 2. ⚠️ Diagnostic Traps
+#### 3. 🛑 Lethal Mistakes
+#### 4. ❓ Interactive Doctor Questions
+#### 5. 📋 Exam Rules
+```
+
+1. **Doctor's Spoken Pearls**: what the lecturer actually said, quoted where it is memorable.
+2. **Diagnostic Traps**: must contain at least one `> [!WARNING]` callout.
+3. **Lethal Mistakes**: must contain at least one `> [!CAUTION]` callout.
+4. **Interactive Doctor Questions**: the questions the lecturer threw at the room.
+5. **Exam Rules**: what the lecturer said about the exam itself, plus any summary tables.
 
 ---
 
-### Section 3: ❓ Multiple Choice Questions (MCQs)
+### Section 3: ❓ MCQs
 
 Format every MCQ with clean Markdown field labels and valid badges:
 
 ```markdown
-### Question 1 **[Past Exams - 2022, 2023]**
+### MCQ 1 **[Past Exams - 2022, 2023]**
 
 **Question:** The following are clinical features of acute organophosphate poisoning EXCEPT:-
 
@@ -58,6 +76,9 @@ Format every MCQ with clean Markdown field labels and valid badges:
 - **c.** Dry hot skin and mydriasis
 - **d.** Bradycardia and bronchospasm
 
+**Source:** final Toxico 2022.pdf
+**Source:** final Toxico 2023.pdf
+
 **Correct Answer:** **c.** Dry hot skin and mydriasis
 
 **Clinical Explanation:**
@@ -66,16 +87,24 @@ Format every MCQ with clean Markdown field labels and valid badges:
 
 - **Option Labels**: Unordered list with lowercase bold letters (`- **a.**`, `- **b.**`, `- **c.**`, `- **d.**`).
 - **Spacing**: Always leave a blank line (`\n\n`) before `**Correct Answer:**`.
+- **`**Source:**` — required**: every question carrying a `Past Exams` or
+  `Question Bank` badge needs one `**Source:**` line per supporting source,
+  naming the file exactly as it appears in `Questions/` — bare filename, no
+  parenthetical section names. A block badged only `**[IMP]**` needs none,
+  because the recording is its source. This is enforced: a badged block without
+  it fails validation with `[missing_source]`.
 - **Badges**:
   - `**[Past Exams - 2023]**`
   - `**[Past Exams - 2021, 2022, 2023]**`
   - `**[Question Bank]**`
   - `**[IMP]**`
-  - `**[Past Exams (2022) / IMP]**`
+  - `**[Past Exams (2022) / IMP]**` — note the **parentheses**: the combined
+    form is `(YYYY)`, not `- YYYY`, and it additionally requires the recording
+    to be cited or named in a `**Source:**` line
 
 ---
 
-### Section 4: 📝 Written Questions
+### Section 4: ✍️ Written Questions
 
 Structured short and long questions reflecting actual exam commands:
 
@@ -83,6 +112,8 @@ Structured short and long questions reflecting actual exam commands:
 ### Question 1 **[Past Exams - 2023]**
 
 **Question:** Outline the treatment of CO poisoning: 1...........2........3......4......
+
+**Source:** final Toxico 2023.pdf
 
 **Model Answer:**
 1- Fresh air / Prevent exposure
@@ -96,7 +127,7 @@ Structured short and long questions reflecting actual exam commands:
 
 ---
 
-### Section 5: 🏥 Clinical Cases
+### Section 5: 🩺 Clinical Cases
 
 Grounded clinical vignettes with all original exam sub-questions reproduced verbatim:
 
@@ -110,6 +141,8 @@ Grounded clinical vignettes with all original exam sub-questions reproduced verb
 2. What are the immediate emergency management steps?
 3. Which diagnostic investigation is indicated, and what is the optimal timing?
 4. Mention two absolute contraindications in the initial management.
+
+**Source:** final Toxico 2022.pdf
 
 **Model Answer:**
 1. **Diagnosis:** Corrosive ingestion (Alkali/Acid caustic burn)

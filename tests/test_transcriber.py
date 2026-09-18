@@ -42,6 +42,11 @@ import nlm_client  # noqa: E402
 # it resolves its globals.
 import query_execution  # noqa: E402
 
+# Section validators live in phase_validation; the MCQ field checks are
+# exercised directly so a format the Agent writes by hand can be tested
+# without standing up a whole phase result.
+import phase_validation  # noqa: E402
+
 
 def local_source(name: str, role: str, ocr_status: str | None = None):
     report = (
@@ -1080,6 +1085,43 @@ class TranscriberTests(unittest.TestCase):
         )
         self.assertFalse(
             engine._badge_is_valid("**[Past Exams - 2099]**", {2099})
+        )
+
+    def test_bold_option_label_in_correct_answer_matches_its_option(self) -> None:
+        """`**Correct Answer:** **b.** Naloxone` is the form the skill's own
+        drafting reference documents, and it is what the Agent writes when it
+        builds the sections itself from a verbatim transcript. The bold closes
+        *after* the period, so the marker regex has to consume that trailing
+        `**` exactly as _option_entries does -- otherwise the answer text reads
+        as `** naloxone`, disagrees with its own option, and every correctly
+        written block is rejected."""
+        options = (
+            "- **a.** Atropine\n"
+            "- **b.** Naloxone\n"
+            "- **c.** Vitamin K\n"
+            "- **d.** Pralidoxime\n"
+        )
+        block = (
+            "### MCQ 1 **[IMP]**\n\n"
+            "**Question:** Which antidote is used?\n\n"
+            "**Options:**\n" + options + "\n"
+            "**Correct Answer:** **b.** Naloxone\n\n"
+            "**Clinical Explanation:** شرح\n"
+        )
+        self.assertEqual(
+            phase_validation._correct_answer_errors(block, 1, options), []
+        )
+
+    def test_correct_answer_still_caught_when_it_contradicts_its_option(self) -> None:
+        """The fix must not blunt the check it lives in."""
+        options = "- **a.** Atropine\n- **b.** Naloxone\n"
+        block = (
+            "**Options:**\n" + options + "\n"
+            "**Correct Answer:** **b.** Atropine\n"
+        )
+        self.assertEqual(
+            phase_validation._correct_answer_errors(block, 1, options),
+            ["MCQ 1 Correct Answer text differs from its option"],
         )
 
     def test_exact_mcq_duplicates_merge_years_and_all_sources(self) -> None:
