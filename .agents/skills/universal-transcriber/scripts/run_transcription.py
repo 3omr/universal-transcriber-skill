@@ -24,6 +24,10 @@ if TYPE_CHECKING:  # imported lazily at runtime, so only the checker sees it
     from question_bank import BankQuestion, QuestionBank
 
 from console import configure_console_streams
+
+# Names only. The engine modules themselves stay lazy, so an optional
+# dependency is never imported by a run that does not use it.
+from engines import ENGINE_NAMES, TRANSCRIPTION_ENGINES
 from file_lock import exclusive_file_lock
 from module_registry import (
     ModuleConfig,
@@ -1152,11 +1156,15 @@ def _execute_selected(
     return 0
 
 
-def _whisper_recording(args: argparse.Namespace, context: LauncherContext) -> Path:
+def _transcription_recording(
+    args: argparse.Namespace, context: LauncherContext
+) -> Path:
     """The recording to transcribe: --lecture matched against Lecture/."""
     lecture_dir = context.module.paths.lecture
     if not args.lecture:
-        raise LauncherError("--engine whisper needs --lecture naming the recording")
+        raise LauncherError(
+            f"--engine {args.engine} needs --lecture naming the recording"
+        )
     wanted = normalize_module_name(args.lecture)
     candidates = [
         path
@@ -1176,25 +1184,74 @@ def _whisper_recording(args: argparse.Namespace, context: LauncherContext) -> Pa
     return recordings[0]
 
 
+def _transcription_engine_for(
+    args: argparse.Namespace, context: LauncherContext
+) -> tuple[Any, str]:
+    """The transcription backend named by --engine, plus its install hint.
+
+    The hint is returned rather than raised because is_available() is the
+    caller's gate: an engine that cannot run here is a sentence telling the
+    user what to do, not a traceback.
+    """
+    from engines import NOTEBOOKLM_RAW, WHISPER, get_transcription_engine
+
+    if args.engine == NOTEBOOKLM_RAW:
+        engine = get_transcription_engine(
+            NOTEBOOKLM_RAW,
+            notebook_uuid=context.module.notebook.notebook_id,
+            config=context.config,
+        )
+        hint = (
+            "The nlm CLI is required for --engine notebooklm-raw, and the "
+            "module must name a notebook. Run --doctor-live to check, or use "
+            "--engine whisper to transcribe locally instead."
+        )
+        return engine, hint
+
+    from engines.whisper import INSTALL_HINT
+
+    return get_transcription_engine(WHISPER, model_size=args.whisper_model), INSTALL_HINT
+
+
+def _verbatim_provenance(engine_name: str, args: argparse.Namespace, result: Any) -> str:
+    """The one line in the file that says where this text came from.
+
+    Worth its own function: the whole point of a verbatim transcript is that a
+    later reader can tell whether it is a recognition or a reading, and which
+    recogniser produced it.
+    """
+    from engines import NOTEBOOKLM_RAW
+
+    if engine_name == NOTEBOOKLM_RAW:
+        return (
+            "read back from NotebookLM's own transcript of the audio "
+            f"(`{result.model}`), with no AI processing applied"
+        )
+    return f"transcribed locally with faster-whisper ({result.model})"
+
+
 def _run_local_transcription(args: argparse.Namespace, context: LauncherContext) -> int:
-    """Transcribe a recording verbatim on this machine and write it out.
+    """Transcribe a recording verbatim and write it out.
 
     This stops at the raw text on purpose. Restructuring it into the five
     sections here would mean paraphrasing the recording before anyone had read
     it, and the doctor's exact wording is the one thing the exam-style prompts
     treat as authoritative.
+
+    Both transcription engines land here. They differ in where the words come
+    from -- NotebookLM's own transcript, or a local recogniser -- and in
+    nothing else the caller can see.
     """
-    from engines import EngineError, EngineUnavailable, get_transcription_engine
+    from engines import EngineError, EngineUnavailable
 
-    recording = _whisper_recording(args, context)
-    engine = get_transcription_engine("whisper", model_size=args.whisper_model)
+    recording = _transcription_recording(args, context)
+    engine, install_hint = _transcription_engine_for(args, context)
+    label = f"[{engine.name}]"
     if not engine.is_available():
-        from engines.whisper import INSTALL_HINT
-
-        print(f"[!] {INSTALL_HINT}", file=sys.stderr)
+        print(f"[!] {install_hint}", file=sys.stderr)
         return 1
 
-    print(f"[Whisper] Transcribing {recording.name} with the {args.whisper_model} model...")
+    print(f"{label} Transcribing {recording.name}...")
     try:
         result = engine.transcribe(recording, language=args.language)
     except (EngineError, EngineUnavailable) as error:
@@ -1211,15 +1268,11 @@ def _run_local_transcription(args: argparse.Namespace, context: LauncherContext)
     header = (
         f"# Verbatim transcript — {recording.stem}\n\n"
         f"> Raw {result.language or 'auto-detected'} speech from `{recording.name}`, "
-        f"transcribed locally with faster-whisper ({result.model}). Nothing here "
+        f"{_verbatim_provenance(engine.name, args, result)}. Nothing here "
         f"has been summarised or reordered.\n\n"
     )
     target.write_text(header + body + "\n", encoding="utf-8")
-    minutes = int(result.duration // 60)
-    print(
-        f"[Whisper] {result.word_count} words from {minutes} minute(s) of audio "
-        f"-> {target}"
-    )
+    print(f"{label} {result.word_count} words -> {target}")
     print(
         "\nThis is the raw recording, not a transcript in the 5-section format. "
         "Write the sections from it."
@@ -1487,14 +1540,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--engine",
-        choices=("notebooklm", "whisper"),
+        choices=ENGINE_NAMES,
         default="notebooklm",
         help=(
             "Which backend to use. notebooklm (default) runs the five-section "
-            "pipeline. whisper transcribes the recording verbatim on this "
-            "machine and stops there, leaving the Agent to write the sections "
-            "from it -- no account, no network, and no dependency on an "
-            "unofficial API staying up"
+            "pipeline, letting NotebookLM answer each phase prompt. The other "
+            "two return the recording verbatim and stop, leaving the Agent to "
+            "write the sections from the raw text: notebooklm-raw reads back "
+            "the transcript NotebookLM already made of the uploaded audio (no "
+            "extra install, no model download, seconds not minutes), and "
+            "whisper recognises the audio on this machine (no account, no "
+            "network, no dependency on an unofficial API staying up)"
         ),
     )
     parser.add_argument(
@@ -1656,7 +1712,7 @@ def main() -> int:
             return _run_figure_extraction(args, context)
         if args.question_bank or args.exam:
             return _run_question_bank(args, context)
-        if args.engine == "whisper":
+        if args.engine in TRANSCRIPTION_ENGINES:
             return _run_local_transcription(args, context)
         if args.auto_manifest:
             if args.source_manifest:

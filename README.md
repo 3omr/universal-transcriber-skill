@@ -123,31 +123,59 @@ nine pages.
 Pass `--slides` to point at a specific deck, `--all-slide-pages` to render
 everything, and `--figure-resolution` to change the DPI (default 150).
 
-### Transcribing locally, without NotebookLM
+### Getting the raw transcript, and writing the sections yourself
 
-Everything in this tool has gone through NotebookLM, driven by `nlm` — a
-reverse-engineered client for a service with no public API. When that breaks,
-the tool stops. `--engine whisper` is the second path:
-
-```bash
-python3 skills/universal-transcriber/scripts/run_transcription.py \
-  --workspace "$PWD" --module toxo --engine whisper --lecture "OPs" --timestamps
-```
-
-It transcribes the recording **verbatim on your machine** — no account, no
-upload, no network — and stops there, writing `<lecture>.verbatim.md`. It does
-not try to produce the 5-section transcript: the Agent writes those sections
-from the raw text.
+The default pipeline asks NotebookLM to *answer questions about* the recording:
+the five sections are written by a model that has read the audio, behind a
+prompt, out of reach. Two engines take the other half of the deal instead —
+they return **what was said, verbatim**, and stop. The Agent writes the five
+sections from that text, in the open, where every claim can be checked against
+a line sitting in the repo.
 
 That division is deliberate. Restructuring the recording before anyone has read
 it would mean paraphrasing the doctor, and the doctor's exact wording is the one
 thing the exam-style prompts treat as authoritative — `الدكتور قال نصاً` is a
 claim the transcript makes, and it has to stay true.
 
+Both write `<lecture>.verbatim.md` and neither produces the 5-section format.
+
+#### `--engine notebooklm-raw` — read back what NotebookLM already transcribed
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module radio --engine notebooklm-raw --lecture "مراجعه اشعه"
+```
+
+NotebookLM transcribes every audio source it ingests. This reads that
+transcript back with `nlm content source`, which is explicitly *no AI
+processing*, and hands it over unedited.
+
+It is the cheapest path by a wide margin: **nothing new to install** (`nlm` is
+already required), no model download, no CUDA, and it returns in seconds
+because the recording was transcribed when it was uploaded. It is also the same
+recognition NotebookLM itself reasons over, so the raw text and the phase
+answers cannot disagree about what was said.
+
+What it gives up is timestamps — `nlm content source` returns prose, not
+segments, so `--timestamps` has nothing to render. It also needs the recording
+already uploaded to the module's notebook.
+
+#### `--engine whisper` — recognise the audio locally
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module toxo --engine whisper --lecture "OPs" --timestamps
+```
+
+No account, no upload, no network, and no dependency on an unofficial API
+staying up — the answer to "what happens the day `nlm` breaks". It is the only
+one of the two that produces timestamps.
+
 Needs `pip install faster-whisper`. `--whisper-model` picks the model size
 (default `medium`; the lectures switch between Arabic and English mid-sentence
 and the smaller models get the drug names wrong). Leave `--language` unset so
 the recogniser follows the recording rather than being pinned to one language.
+Expect it to take about as long as the lecture on CPU.
 
 ### The module's question bank
 

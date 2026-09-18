@@ -191,7 +191,11 @@ DEPENDENCIES: tuple[Dependency, ...] = (
     Dependency(
         name="faster-whisper",
         executables=(),
-        purpose="Local verbatim transcription (--engine whisper), no account needed",
+        purpose=(
+            "Local verbatim transcription (--engine whisper), no account needed. "
+            "Not needed for --engine notebooklm-raw, which reads the transcript "
+            "NotebookLM already made"
+        ),
         install_hint="pip install faster-whisper",
         required=False,
         python_module="faster_whisper",

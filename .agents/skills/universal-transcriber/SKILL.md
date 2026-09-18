@@ -102,6 +102,33 @@ The finished draft always assembles them in that order.
 > [!IMPORTANT]
 > **No Wasteful LLM Retries**: If a phase query returns raw text containing minor OCR artifacts (joined words, split letters) or duplicate questions from multiple exam years, **do not make repeated queries to NotebookLM**. The Agent takes the candidate response directly, repairs the OCR and merges/formats the questions with canonical badges, and applies the repaired response immediately via `--recovery-response` or direct draft editing.
 
+> [!NOTE]
+> **Writing the sections yourself, from the verbatim transcript.** The run above
+> lets NotebookLM answer each phase prompt. To take the raw recording instead
+> and write the five sections yourself, use a transcription engine — it returns
+> what was said, unedited, as `<lecture>.verbatim.md`, and stops:
+>
+> ```bash
+> # Read back the transcript NotebookLM already made of the uploaded audio.
+> # Nothing extra to install, returns in seconds, but no timestamps.
+> python3 skills/universal-transcriber/scripts/run_transcription.py \
+>   --workspace "$PWD" --module <module_id> \
+>   --engine notebooklm-raw --lecture "<lecture_name>"
+>
+> # Or recognise the audio on this machine. Needs faster-whisper, takes about
+> # as long as the lecture, and is the only one that produces timestamps.
+> python3 skills/universal-transcriber/scripts/run_transcription.py \
+>   --workspace "$PWD" --module <module_id> \
+>   --engine whisper --lecture "<lecture_name>" --timestamps
+> ```
+>
+> Neither engine restructures the recording. Doing so would paraphrase the
+> doctor before anyone had read him, and `الدكتور قال نصاً` is a claim the
+> finished transcript makes about its own source. Build the five sections from
+> the verbatim text against `references/drafting-and-editorial.md`, and keep
+> the `.verbatim.md` beside the finished transcript so every claim stays
+> checkable against a line of what was actually said.
+
 ### 4. Editorial Review & Source Deduplication
 
 Open and review the generated `.draft.md` before finalization:
