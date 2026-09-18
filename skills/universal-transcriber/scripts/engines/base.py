@@ -17,10 +17,11 @@ Two kinds of engine, because they answer different questions:
 
 ``TranscriptionEngine``
     Given a recording, return what was said -- verbatim, with no restructuring
-    and no summarising. This is what a local Whisper does. It deliberately does
-    not try to imitate the phase pipeline: the Agent takes the raw text and
-    writes the five sections from it, which is a different division of labour,
-    not a worse one.
+    and no summarising. Two backends do this: ``notebooklm-raw`` reads back the
+    transcript NotebookLM already holds, and ``whisper`` recognises the audio
+    locally. Neither tries to imitate the phase pipeline: the Agent takes the
+    raw text and writes the five sections from it, which is a different
+    division of labour, not a worse one.
 """
 
 from __future__ import annotations
@@ -32,6 +33,9 @@ from typing import Protocol, runtime_checkable
 from transcriber_models import PhaseQuery, QueryResult
 
 NOTEBOOKLM = "notebooklm"
+# The same service, read the other way round: not "answer this prompt about the
+# recording" but "give me the transcript you already made of it".
+NOTEBOOKLM_RAW = "notebooklm-raw"
 WHISPER = "whisper"
 
 
@@ -124,6 +128,7 @@ class TranscriptionEngine(Protocol):
 
 __all__ = [
     "NOTEBOOKLM",
+    "NOTEBOOKLM_RAW",
     "WHISPER",
     "EngineError",
     "EngineUnavailable",
