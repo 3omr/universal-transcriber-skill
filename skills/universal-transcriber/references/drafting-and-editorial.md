@@ -145,3 +145,67 @@ Grounded clinical vignettes with all original exam sub-questions reproduced verb
    - Cross-check every extracted question in MCQs, Written Questions, and Clinical Cases against the **Chronological Guide** and the lecture's **slides/PowerPoint**.
    - If an exam question addresses a topic belonging to a separate chapter/lecture that was neither taught by the lecturer in the recording nor included in the slide deck (e.g. Firearm inlet/exit, powder marks, or bevelling appearing in a Mechanical/General Wounds transcript), **prune and delete** the question entirely from the draft.
    - Re-index all remaining question numbers sequentially (`### MCQ 1`, `### MCQ 2`, ..., `### Question 1`, ..., `### Clinical Case 1`).
+
+---
+
+## Figures: Carrying the Pictures into the Transcript
+
+Slides reach NotebookLM as a PPTX or a PDF and NotebookLM answers in text, so
+everything that was a picture — the anatomy of the anterior chamber, a
+gonioscopy view, the photo of the Toxogonin box that is the whole point of an
+antidote slide — is gone by the time a transcript is written. In ophthalmology
+and toxicology that is most of the teaching.
+
+### 1. First, take the figures from the lecture's own deck
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> \
+  --extract-figures --lecture "<lecture_name>"
+# add --slides "Lecture/<deck>.pptx" to illustrate a deck module.json does not map,
+# --figure-resolution <dpi> to change the 150 DPI default,
+# --all-slides to render every page instead of only the diagram pages.
+```
+
+A page is rendered when it carries almost no extractable text **and** actually
+embeds an image — both tests, because a section divider reading just `Warfarin`
+has eight characters and no picture, and rendering it produces a blank slide
+with a title on it. The run writes the PNGs plus a `figures.json` into
+`Transcripts/Figures/<lecture>/` and prints the markdown to paste. Place each
+image in the **Chronological Guide**, at the point the doctor was talking about
+it — not in a gallery at the end.
+
+The doctor's own slide always wins. It is what the students saw, it is what the
+exam was written from, and it needs no attribution.
+
+### 2. Only if the deck has none, source one from the web
+
+When a passage genuinely cannot be understood without a picture — an anatomical
+relationship, a characteristic radiological sign, a rash or lesion whose
+appearance *is* the diagnosis, an ECG pattern, a dosing or management algorithm —
+and neither the deck nor `Figures/` has one, search the web for a replacement.
+
+- **Only when the text needs it.** A figure that decorates a paragraph the words
+  already carry is noise. Prose that reads fine without a picture gets no picture.
+- **Openly licensed sources only**: Wikimedia Commons, Open-i, NIH/CDC/PHIL,
+  Radiopaedia cases marked reusable, or an open-access journal figure (CC BY /
+  CC BY-SA / public domain). Do not take images from paid textbooks, lecture
+  decks belonging to other faculties, Google Images thumbnails, or anything
+  whose licence you could not name if asked.
+- **Verify before you place it.** Read the source page and confirm the image
+  really shows the finding named in the caption. A plausible-looking image of the
+  wrong pathology is worse than no image at all — the student revises from it.
+- **Save it beside the extracted ones** in `Transcripts/Figures/<lecture>/` with
+  a descriptive filename (`web-gonioscopy-open-angle.png`), so the transcript
+  keeps working offline and does not rot when a URL dies.
+- **Caption it as external, with attribution**, so nobody mistakes it for what
+  the doctor showed:
+
+  ```markdown
+  ![Open-angle gonioscopy view](./Figures/Glaucoma/web-gonioscopy-open-angle.png)
+  > 🌐 **صورة من الإنترنت** (مش من سلايدات الدكتور) — [Wikimedia Commons](<url>), CC BY-SA 4.0.
+  ```
+
+- **Never invent, generate, or edit a medical image**, and never relabel one to
+  fit the text. If nothing suitable and properly licensed exists, write the
+  passage without a figure and note `NEEDS_FIGURE` so a human can decide.
