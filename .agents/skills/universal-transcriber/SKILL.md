@@ -75,23 +75,53 @@ You can either use the **automatic manifest generator** (`--auto-manifest "<lect
 
 ### 3. Draft & Agent In-Flight Repair
 
-Run the launcher in draft mode to execute preparation (conversions/OCR), upload necessary files, query NotebookLM concurrently across all 5 sections, and produce an evidence-rich `.draft.md`:
+**Default route — the verbatim transcript.** When the user says `فرغ` / `اعمل تفريغ`
+without naming a backend, run `notebooklm-raw`. It reads back the transcript
+NotebookLM already made of the uploaded audio: nothing extra to install, returns
+in seconds, and it does not restructure a word of what the doctor said.
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> \
+  --engine notebooklm-raw --lecture "<lecture_name>"
+```
+
+The run writes `<lecture>.verbatim.md` and stops. Build the five sections from
+that verbatim text yourself, against `references/drafting-and-editorial.md`, and
+keep the `.verbatim.md` beside the finished transcript so every claim stays
+checkable against a line of what was actually said — `الدكتور قال نصاً` is a
+claim the finished transcript makes about its own source.
+
+> [!IMPORTANT]
+> **Do not use the other backends unless the user names one.** The five-section
+> NotebookLM pipeline (`--engine notebooklm`) and local Whisper (`--engine
+> whisper --timestamps`, the only one with timestamps) stay available, but they
+> run only on an explicit request — `استخدم النوت بوك بايبلاين`, `استخدم whisper`,
+> or the equivalent in English. Until the user says so, `notebooklm-raw` is the
+> engine for every transcription run.
+
+<details>
+<summary>The five-section NotebookLM pipeline (only on explicit request)</summary>
+
+Run the launcher in draft mode to execute preparation (conversions/OCR), upload
+necessary files, query NotebookLM concurrently across all 5 sections, and produce
+an evidence-rich `.draft.md`:
 
 ```bash
 # Using Auto-Manifest (Fastest for single lecture):
 python3 skills/universal-transcriber/scripts/run_transcription.py \
   --workspace "$PWD" --module <module_id> \
-  --auto-manifest "<lecture_name>" --draft-only
+  --engine notebooklm --auto-manifest "<lecture_name>" --draft-only
 
 # Or Transcribing ALL Pending Lectures in the Module in Batch:
 python3 skills/universal-transcriber/scripts/run_transcription.py \
   --workspace "$PWD" --module <module_id> \
-  --transcribe-all-pending --draft-only
+  --engine notebooklm --transcribe-all-pending --draft-only
 
 # Or using Custom Manifest:
 python3 skills/universal-transcriber/scripts/run_transcription.py \
   --workspace "$PWD" --module <module_id> \
-  --source-manifest /tmp/<lecture>-manifest.json --draft-only
+  --engine notebooklm --source-manifest /tmp/<lecture>-manifest.json --draft-only
 ```
 
 The engine queries all five sections **concurrently** and checkpoints each one
@@ -99,35 +129,31 @@ independently, so a phase that fails does not discard the phases that passed:
 `📖 Chronological Guide`, `⭐ IMP Points`, `❓ MCQs`, `📝 Written Questions`, `🏥 Clinical Cases`.
 The finished draft always assembles them in that order.
 
-> [!IMPORTANT]
-> **No Wasteful LLM Retries**: If a phase query returns raw text containing minor OCR artifacts (joined words, split letters) or duplicate questions from multiple exam years, **do not make repeated queries to NotebookLM**. The Agent takes the candidate response directly, repairs the OCR and merges/formats the questions with canonical badges, and applies the repaired response immediately via `--recovery-response` or direct draft editing.
+**No Wasteful LLM Retries**: If a phase query returns raw text containing minor
+OCR artifacts (joined words, split letters) or duplicate questions from multiple
+exam years, **do not make repeated queries to NotebookLM**. The Agent takes the
+candidate response directly, repairs the OCR and merges/formats the questions
+with canonical badges, and applies the repaired response immediately via
+`--recovery-response` or direct draft editing.
 
-> [!NOTE]
-> **Writing the sections yourself, from the verbatim transcript.** The run above
-> lets NotebookLM answer each phase prompt. To take the raw recording instead
-> and write the five sections yourself, use a transcription engine — it returns
-> what was said, unedited, as `<lecture>.verbatim.md`, and stops:
->
-> ```bash
-> # Read back the transcript NotebookLM already made of the uploaded audio.
-> # Nothing extra to install, returns in seconds, but no timestamps.
-> python3 skills/universal-transcriber/scripts/run_transcription.py \
->   --workspace "$PWD" --module <module_id> \
->   --engine notebooklm-raw --lecture "<lecture_name>"
->
-> # Or recognise the audio on this machine. Needs faster-whisper, takes about
-> # as long as the lecture, and is the only one that produces timestamps.
-> python3 skills/universal-transcriber/scripts/run_transcription.py \
->   --workspace "$PWD" --module <module_id> \
->   --engine whisper --lecture "<lecture_name>" --timestamps
-> ```
->
-> Neither engine restructures the recording. Doing so would paraphrase the
-> doctor before anyone had read him, and `الدكتور قال نصاً` is a claim the
-> finished transcript makes about its own source. Build the five sections from
-> the verbatim text against `references/drafting-and-editorial.md`, and keep
-> the `.verbatim.md` beside the finished transcript so every claim stays
-> checkable against a line of what was actually said.
+</details>
+
+### 3b. Figures
+
+Slides reach NotebookLM as text, so every picture is lost by the time a
+transcript is written. Render the deck's diagram pages and place them in the
+Chronological Guide where the doctor showed them:
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> \
+  --extract-figures --lecture "<lecture_name>"
+```
+
+If the deck has no figure for a passage that cannot be understood without one,
+source an openly-licensed image from the web, save it beside the extracted ones,
+and caption it as external with attribution. Rules, licence limits, and the
+caption format: [references/drafting-and-editorial.md](references/drafting-and-editorial.md#figures-carrying-the-pictures-into-the-transcript).
 
 ### 4. Editorial Review & Source Deduplication
 
@@ -160,7 +186,7 @@ Verify that the transcript exists under `modules/<module_id>/Transcripts/` and h
 When handling two or more lectures in one request:
 1. Initialize the batch ledger using `scripts/batch_state.py`.
 2. Spawn **one native sub-agent worker per lecture unit** (not per audio file).
-3. Workers run `--draft-only` and return their `.draft.md`.
+3. Workers run `--engine notebooklm-raw` and return their `.verbatim.md`, from which the sections are written (or `--draft-only` when the user has explicitly asked for the NotebookLM pipeline).
 4. The primary agent performs editorial review, runs `--finalize-draft`, and commits the transcripts.
 
 *Complete multi-agent specification: [references/multi-agent.md](references/multi-agent.md).*
@@ -170,7 +196,7 @@ When handling two or more lectures in one request:
 ## References
 
 - [references/source-sync-and-manifest.md](references/source-sync-and-manifest.md) — Module sync, live inventory reconciliation, OCR/conversions, and JSON manifest schemas.
-- [references/drafting-and-editorial.md](references/drafting-and-editorial.md) — 5-section transcript standard, Egyptian Arabic tone guidelines, and validation gates.
+- [references/drafting-and-editorial.md](references/drafting-and-editorial.md) — 5-section transcript standard, Egyptian Arabic tone guidelines, figures (slide extraction and web sourcing), and validation gates.
 - [references/exam-style.md](references/exam-style.md) — Past exam sampling, MCQ/written pattern capture, and duplicate merging rules.
 - [references/multi-agent.md](references/multi-agent.md) — Sub-agent worker packet, ledger lifecycle, capacity scheduling, and fan-in acceptance.
 - [references/modules.md](references/modules.md) — Directory layout, `module.json` schema, and module management CLI.
