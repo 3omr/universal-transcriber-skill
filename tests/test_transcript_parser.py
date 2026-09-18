@@ -146,6 +146,60 @@ class FieldTests(unittest.TestCase):
     def test_a_missing_field_is_empty_rather_than_an_error(self) -> None:
         self.assertEqual(field_value("### MCQ 1", "Correct Answer"), "")
 
+    def test_a_heading_inside_an_answer_does_not_end_it(self) -> None:
+        """`**كلمة:**` is ordinary writing, not a field.
+
+        A Model Answer opening on `**Small bowel:**` parsed as empty, because
+        the reader ended a field at the next line starting with a bold label of
+        any kind. Only the names in FIELD_NAMES end a field.
+        """
+        block = (
+            "**Model Answer:**\n"
+            "**Small bowel:** adhesions, hernia, intussusception\n"
+            "**Large bowel:** carcinoma, volvulus\n\n"
+            "**Clinical Explanation:** الشرح\n"
+        )
+
+        answer = field_value(block, "Model Answer")
+
+        self.assertIn("Small bowel", answer)
+        self.assertIn("volvulus", answer)
+        self.assertNotIn("الشرح", answer)
+
+    def test_a_heading_mid_answer_does_not_truncate_it(self) -> None:
+        """The dangerous half: this one used to pass validation.
+
+        A field truncated mid-answer still holds text, so nothing reported it
+        missing -- the answer simply lost its last points and was called clean.
+        """
+        block = (
+            "**Model Answer:**\n"
+            "1- ABC\n"
+            "**ملحوظة:** الغسيل ممنوع\n"
+            "2- Antibiotics\n"
+            "3- Steroids\n\n"
+            "**Clinical Explanation:** الشرح\n"
+        )
+
+        answer = field_value(block, "Model Answer")
+
+        self.assertIn("Steroids", answer)
+        self.assertIn("ملحوظة", answer)
+
+    def test_a_parenthesised_field_name_still_closes_the_field_before_it(self) -> None:
+        """Why the boundary alternation is ordered longest name first.
+
+        Shortest-first, "Model Answer" matches and then demands a colon, finds
+        " (Short):" instead, and the boundary never fires -- so the field above
+        swallows the one below it.
+        """
+        block = (
+            "**Model Answer:** full prose answer\n"
+            "**Model Answer (Short):** keywords only\n"
+        )
+
+        self.assertEqual(field_value(block, "Model Answer"), "full prose answer")
+
 
 class ParseTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -32,6 +32,7 @@ from transcriber_models import (
     QuestionEvidence,
     QuestionProvenanceContext,
 )
+from transcript_parser import FIELD_NAME_PATTERN
 
 ALLOWED_CALLOUTS = {"NOTE", "IMPORTANT", "WARNING", "CAUTION", "TIP"}
 SECTION_HEADINGS = (
@@ -626,9 +627,18 @@ def _question_provenance_errors(
 
 
 def _field_content(block: str, field_name: str) -> str:
+    """The text of one field, ending where the next *field* begins.
+
+    The boundary is FIELD_NAMES, not "any bold label". A sub-heading the author
+    wrote inside an answer -- `**Small bowel:**`, `**ملحوظة:**` -- used to close
+    the field it was part of: the answer parsed as empty when the heading came
+    first, and was truncated at it when it came halfway down. The truncation
+    passed validation, because a field that still holds text is not a missing
+    one, so an answer could lose its last three points and be reported clean.
+    """
     pattern = (
         rf"(?ms)^\s*(?:>\s*)?\*\*{re.escape(field_name)}:\*\*\s*"
-        rf"(.*?)(?=^\s*(?:>\s*)?\*\*[^*\n]+:\*\*|\Z)"
+        rf"(.*?)(?=^\s*(?:>\s*)?\*\*(?:{FIELD_NAME_PATTERN}):\*\*|\Z)"
     )
     match = re.search(pattern, block)
     return match.group(1).strip() if match else ""
