@@ -181,7 +181,11 @@ def parse_source(source_name: str, text: str) -> list[IndexedQuestion]:
                 if current:
                     questions.append(current)
                 counter += 1
-                stem = clean_stem(start.group(2) if start else bullet.group(1))
+                opener = start or bullet
+                assert opener is not None  # one of the two matched
+                stem = clean_stem(
+                    start.group(2) if start else opener.group(1)
+                )
                 current = IndexedQuestion(
                     number=int(start.group(1)) if start else counter,
                     kind="mcq",

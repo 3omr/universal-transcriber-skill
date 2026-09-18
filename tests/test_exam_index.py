@@ -1,6 +1,5 @@
 """The exam index is what a badge's honesty now rests on."""
 
-import importlib.util
 import sys
 import tempfile
 import unittest
@@ -15,9 +14,9 @@ SCRIPTS_DIR = (
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Imported after the path setup above, which is what makes them importable.
 import exam_index  # noqa: E402
 import provenance_audit  # noqa: E402
-
 
 COMPILED_BANK = """--- End 2022 ---
 1. As regard cardiac ultrasound, it can assess

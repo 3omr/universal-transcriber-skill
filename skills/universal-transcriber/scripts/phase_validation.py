@@ -23,8 +23,8 @@ from typing import Any
 from engine_utils import _catalog_entry_is_available, _unique_strings, is_empty_sentinel
 from exam_years import ARABIC_DIGITS, is_reasonable_exam_year
 from output_assembly import format_markdown_tables
-from question_prompts import IMP_HEADINGS, NO_MCQS, NO_WRITTEN
 from provenance_audit import index_years
+from question_prompts import IMP_HEADINGS, NO_MCQS, NO_WRITTEN
 from source_naming import normalize_source_key, normalize_source_stem
 from transcriber_models import (
     CaseEvidence,
@@ -574,7 +574,7 @@ def _question_badge_provenance_errors(
     if indexed is not None:
         # The index settles this question's provenance; the file-level year map
         # can only over- or under-claim it.
-        return indexed + _question_role_provenance_errors(context, ())
+        return indexed + _question_role_provenance_errors(context, set())
     field_errors, evidenced_years, roles = _source_field_errors(
         _source_fields(context.block),
         context.heading_prefix,
@@ -1227,9 +1227,12 @@ def _mcq_field_errors(answer: str, evidence: QuestionEvidence) -> list[str]:
             errors.append(f"MCQ {number} [missing_field]: missing **Correct Answer:**")
         if not has_explanation:
             errors.append(f"MCQ {number} [missing_field]: missing **Clinical Explanation:**")
-        if "**[IMP]**" not in block and "**Source:**" not in block:
-            if not _indexed(block, evidence):
-                errors.append(f"MCQ {number} [missing_source]: missing **Source:**")
+        if (
+            "**[IMP]**" not in block
+            and "**Source:**" not in block
+            and not _indexed(block, evidence)
+        ):
+            errors.append(f"MCQ {number} [missing_source]: missing **Source:**")
     return errors
 
 
@@ -1247,11 +1250,12 @@ def _written_field_errors(answer: str, evidence: QuestionEvidence) -> list[str]:
             errors.append(
                 f"Question {number} [missing_field]: missing **Model Answer:**"
             )
-        if "**[IMP]**" not in block and "**Source:**" not in block:
-            if not _indexed(block, evidence):
-                errors.append(
-                    f"Question {number} [missing_source]: missing **Source:**"
-                )
+        if (
+            "**[IMP]**" not in block
+            and "**Source:**" not in block
+            and not _indexed(block, evidence)
+        ):
+            errors.append(f"Question {number} [missing_source]: missing **Source:**")
     return errors
 
 
