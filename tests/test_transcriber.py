@@ -37,15 +37,15 @@ SPEC.loader.exec_module(engine)
 # that function resolves its own globals, which is here.
 import nlm_client  # noqa: E402
 
-# The phase query loop -- scope splitting, retry, quarantine -- moved to
-# query_execution. Same reasoning as nlm_client above: replace a function where
-# it resolves its globals.
-import query_execution  # noqa: E402
-
 # Section validators live in phase_validation; the MCQ field checks are
 # exercised directly so a format the Agent writes by hand can be tested
 # without standing up a whole phase result.
 import phase_validation  # noqa: E402
+
+# The phase query loop -- scope splitting, retry, quarantine -- moved to
+# query_execution. Same reasoning as nlm_client above: replace a function where
+# it resolves its globals.
+import query_execution  # noqa: E402
 
 
 def local_source(name: str, role: str, ocr_status: str | None = None):
