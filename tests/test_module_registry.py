@@ -131,6 +131,41 @@ class ModuleRegistryTests(unittest.TestCase):
                 modules / "toxo" / "Lecture" / "slides.pptx",
             )
 
+    def test_a_folder_that_is_not_a_module_is_skipped(self) -> None:
+        """A stray directory under modules/ must not fail an unrelated run.
+
+        An empty `modules/Figures/` left behind by a tool made
+        `--module toxo --verify-provenance` die on "Missing module config:
+        modules/Figures/module.json", naming a module nobody had asked for.
+        Discovery walks every directory, so anything without a module.json is
+        not a module and is passed over -- the same reason `.obsidian` is.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory).resolve()
+            modules = workspace / "modules"
+            toxo = modules / "toxo"
+            for name in ("Lecture", "Questions", "Transcripts"):
+                (toxo / name).mkdir(parents=True)
+            (modules / "Figures").mkdir()
+            (modules / ".obsidian").mkdir()
+            (toxo / "module.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "module_id": "toxo",
+                        "display_name": "Toxicology",
+                        "aliases": ["سموم"],
+                        "notebook": {"id": "n", "title": "Toxo"},
+                        "output": {"emoji": "🧪"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            found = discover_modules(workspace)
+
+            self.assertEqual([m.module_id for m in found], ["toxo"])
+
     def test_source_manifest_preserves_agent_exam_style_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             manifest_path = Path(temporary_directory).resolve() / "manifest.json"
