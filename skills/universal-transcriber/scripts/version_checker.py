@@ -17,7 +17,7 @@ from pathlib import Path
 # The repository root VERSION file is the single source of truth. FALLBACK_VERSION
 # only matters when a skill directory is installed on its own, detached from the
 # repository root -- keep the two in step with scripts/bump-version.sh.
-FALLBACK_VERSION = "1.9.2"
+FALLBACK_VERSION = "1.10.0"
 VERSION_FILE_NAME = "VERSION"
 REPO_NAME = "3omr/universal-transcriber-skill"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_NAME}/releases/latest"
