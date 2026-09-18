@@ -73,6 +73,51 @@ You can either use the **automatic manifest generator** (`--auto-manifest "<lect
 
 *Full manifest schema and examples: [references/source-sync-and-manifest.md](references/source-sync-and-manifest.md).*
 
+### 2b. Build the Module's Exam Index — once, before any drafting
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> --build-exam-index
+```
+
+This reads every paper in `Questions/` into `Questions/exam-index.json`: each
+question with its options, its answer where the paper marks one, the file and
+**section** it came from, and the year that section can honestly claim.
+
+> [!IMPORTANT]
+> **Take questions from the index, never from the raw papers.** Copy the stem,
+> the options, the answer key and the years out of it; do not retype them and
+> do not judge provenance by reading the `.txt`. The papers are OCR of scans —
+> a question can be shredded past recognition, and two unrelated medical
+> sentences share enough words to look like the same question. Every draft that
+> re-decided this from raw text decided it differently.
+
+Three rules the index encodes, and no filename can:
+
+- **A year comes from the section, not the file.** `Radiology_Exams_2026.txt`
+  holds `--- End 2022 ---` next to an unlabelled `--- Page 12 ---`. A question
+  under the latter claims **no year** — it is `**[Question Bank]**`, whatever
+  the file is called.
+- **`--- Page 1 ---` on a single scanned paper is pagination, not provenance.**
+  There the filename is the only statement of which paper it is.
+- **A question asked in two years is one entry carrying both**, so a badge can
+  claim both instead of under-claiming one.
+
+Questions the scan destroyed are listed at the end of the run. **Repair them
+once, in the index**, and add `"repaired_by_hand": "<what you read off the
+page>"` to the entry — rebuilds carry those forward instead of discarding them.
+A repair **replaces** the parsed entry and inherits every year that entry
+carried, so fixing one copy of a question asked twice gives you both years.
+
+> [!IMPORTANT]
+> **Check the OCR before trusting a low question count.** If a paper indexes far
+> fewer questions than it has, or the stems read as noise, the `.txt` beside it
+> is bad OCR, not a bad parser. Re-run it at a resolution tesseract can read —
+> `pdftoppm -r 400 -png` then `tesseract <page> - -l eng --psm 6` per page — and
+> rebuild. One module's papers went from unusable to 603 indexed questions on
+> this alone; `pdftotext` on a scan returns whatever layer is already embedded,
+> which for a phone photo of an exam paper is often garbage.
+
 ### 3. Draft & Agent In-Flight Repair
 
 **Default route — the verbatim transcript.** When the user says `فرغ` / `اعمل تفريغ`
@@ -154,6 +199,32 @@ If the deck has no figure for a passage that cannot be understood without one,
 source an openly-licensed image from the web, save it beside the extracted ones,
 and caption it as external with attribution. Rules, licence limits, and the
 caption format: [references/drafting-and-editorial.md](references/drafting-and-editorial.md#figures-carrying-the-pictures-into-the-transcript).
+
+### 3c. Verify Provenance — a gate, not a courtesy
+
+```bash
+python3 skills/universal-transcriber/scripts/run_transcription.py \
+  --workspace "$PWD" --module <module_id> \
+  --verify-provenance "<lecture> <emoji>.md"
+```
+
+Every `**[Past Exams - YYYY]**` is held against the paper it names; the command
+exits non-zero if a badge claims a year its sources do not support. **Run it
+before finalizing, and fix what it reports** — drop the year, or cite the paper
+that actually carries the question.
+
+The section validators do not cover this. They check that a cited file exists
+and that the year is one the evidence catalog knows, which a fabricated badge
+satisfies: six clinical cases once shipped badged `**[Past Exams - 2022,
+2023]**` on scenarios that were in no paper at all, and passed every phase
+validator. A badge is a promise to a student revising by it.
+
+> [!IMPORTANT]
+> **Clinical cases are the usual offender.** Most papers here have no
+> clinical-case section — they are MCQs and short essays. A vignette you built
+> to tie the lecture together is `**[IMP]**`, sourced to the recording, and
+> says so in the section. It is not a past-exam question because its *topic*
+> came from one.
 
 ### 4. Editorial Review & Source Deduplication
 

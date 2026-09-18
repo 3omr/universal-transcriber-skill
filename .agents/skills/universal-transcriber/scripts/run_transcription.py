@@ -1156,27 +1156,75 @@ def _execute_selected(
     return 0
 
 
+AUDIO_SUFFIXES = frozenset(
+    {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".mp4", ".mkv"}
+)
+
+
+def _remote_recording(args: argparse.Namespace, context: LauncherContext) -> Path:
+    """The recording named by --lecture, found in the notebook rather than on disk.
+
+    notebooklm-raw never opens the audio -- it reads back the transcript
+    NotebookLM already made -- so a module whose recordings live only in the
+    notebook is not missing anything this engine needs. The returned Path is a
+    name, not a file: the engine matches it against the remote source titles.
+    """
+    from nlm_client import list_remote_sources
+
+    notebook_id = context.module.notebook.notebook_id
+    if not notebook_id:
+        raise LauncherError(
+            f"No recording under {context.module.paths.lecture} matches "
+            f"{args.lecture!r}, and the module names no notebook to look in."
+        )
+    wanted = normalize_module_name(args.lecture)
+    audio = [
+        source
+        for source in list_remote_sources(notebook_id, context.config)
+        if source.source_type.casefold() in {"audio", "video"}
+    ]
+    matches = [
+        source for source in audio if wanted in normalize_module_name(source.title)
+    ]
+    if not matches:
+        known = ", ".join(sorted(s.title for s in audio)) or "none"
+        raise LauncherError(
+            f"Nothing named {args.lecture!r} is on disk or in the notebook. "
+            f"Audio in the notebook: {known}"
+        )
+    if len(matches) > 1:
+        names = ", ".join(sorted(s.title for s in matches))
+        raise LauncherError(f"{args.lecture!r} matches several recordings: {names}")
+    return Path(matches[0].title)
+
+
 def _transcription_recording(
     args: argparse.Namespace, context: LauncherContext
 ) -> Path:
-    """The recording to transcribe: --lecture matched against Lecture/."""
+    """The recording to transcribe: --lecture matched against Lecture/.
+
+    Falls back to the notebook for engines that read the transcript remotely,
+    which is the documented "remote-only mode" -- audio uploaded once, never
+    kept locally.
+    """
+    from engines import NOTEBOOKLM_RAW
+
     lecture_dir = context.module.paths.lecture
     if not args.lecture:
         raise LauncherError(
             f"--engine {args.engine} needs --lecture naming the recording"
         )
     wanted = normalize_module_name(args.lecture)
-    candidates = [
-        path
-        for path in sorted(lecture_dir.glob("*"))
-        if path.is_file() and wanted in normalize_module_name(path.stem)
-    ]
     recordings = [
         path
-        for path in candidates
-        if path.suffix.casefold() in {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".mp4", ".mkv"}
+        for path in sorted(lecture_dir.glob("*"))
+        if path.is_file()
+        and wanted in normalize_module_name(path.stem)
+        and path.suffix.casefold() in AUDIO_SUFFIXES
     ]
     if not recordings:
+        if args.engine == NOTEBOOKLM_RAW:
+            return _remote_recording(args, context)
         raise LauncherError(f"No recording under {lecture_dir} matches {args.lecture!r}")
     if len(recordings) > 1:
         names = ", ".join(path.name for path in recordings)
@@ -1261,7 +1309,7 @@ def _run_local_transcription(args: argparse.Namespace, context: LauncherContext)
     target = (
         Path(args.output).expanduser()
         if args.output
-        else context.module.paths.transcripts / f"{recording.stem}.verbatim.md"
+        else context.module.paths.verbatim / f"{recording.stem}.verbatim.md"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     body = result.with_timestamps() if args.timestamps else result.text
@@ -1453,6 +1501,106 @@ def _figure_slide_source(args: argparse.Namespace, context: LauncherContext) -> 
     )
 
 
+def _run_provenance_check(args: argparse.Namespace, context: LauncherContext) -> int:
+    """Hold every year badge in a transcript against the papers it names."""
+    import re as _re
+
+    from exam_index import ExamIndexError, load_index
+    from provenance_audit import supported_years
+
+    transcript = Path(args.verify_provenance).expanduser()
+    if not transcript.is_file():
+        transcript = context.module.paths.transcripts / args.verify_provenance
+    if not transcript.is_file():
+        print(f"[!] No such transcript: {args.verify_provenance}", file=sys.stderr)
+        return 1
+    try:
+        index = load_index(context.module.paths.questions)
+    except ExamIndexError:
+        index = None
+        print(
+            "[!] No exam index; falling back to matching raw paper text. "
+            "Build one with --build-exam-index for exact answers."
+        )
+    corpus = {
+        path.name: path.read_text(encoding="utf-8", errors="replace")
+        for path in context.module.paths.questions.glob("*")
+        if path.is_file() and path.suffix.lower() in {".txt", ".md"}
+    }
+    text = transcript.read_text(encoding="utf-8")
+    violations: list[str] = []
+    checked = 0
+    for block in _re.split(r"(?m)^(?=### )", text):
+        heading = _re.match(r"### (MCQ|Question|Clinical Case) (\d+) (.+)", block)
+        if not heading or "Past Exams" not in heading.group(3):
+            continue
+        stem = _re.search(r"\*\*(?:Question|Scenario):\*\*\s*(.+)", block)
+        if not stem:
+            continue
+        checked += 1
+        options = _re.search(r"\*\*Options:\*\*\n((?:- .+\n)+)", block)
+        claimed = {int(year) for year in _re.findall(r"20\d{2}", heading.group(3))}
+        supported = set(
+            supported_years(
+                stem.group(1),
+                corpus,
+                options.group(1) if options else "",
+                index=index,
+            )
+        )
+        unsupported = claimed - supported
+        if unsupported:
+            violations.append(
+                f"  {heading.group(1)} {heading.group(2)}: claims "
+                f"{sorted(claimed)}, papers support {sorted(supported) or 'nothing'}"
+                f" -- unbacked: {sorted(unsupported)}"
+            )
+    print(f"{checked} year badge(s) checked in {transcript.name}")
+    if violations:
+        print("\n[!] Badges claiming provenance the sources do not support:")
+        print("\n".join(violations))
+        print(
+            "\nA badge is a promise to a student revising by it. Drop the year "
+            "or cite the paper that carries the question."
+        )
+        return 1
+    print("Every year badge is backed by the paper it names.")
+    return 0
+
+
+def _run_exam_index(args: argparse.Namespace, context: LauncherContext) -> int:
+    """Build the module's exam index, once, from its question papers."""
+    from exam_index import (
+        ExamIndexError,
+        build_index,
+        carry_over_repairs,
+        render_summary,
+        write_index,
+    )
+
+    try:
+        index = build_index(context.module.paths.questions, context.module.module_id)
+        index = carry_over_repairs(index, context.module.paths.questions)
+        target = write_index(index, context.module.paths.questions)
+    except ExamIndexError as error:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+    print(render_summary(index))
+    print(f"\n-> {target}")
+    damaged = [
+        key for key, question in index["questions"].items() if not question["legible"]
+    ]
+    if damaged:
+        print(
+            f"\n[!] {len(damaged)} question(s) the scan left unreadable. They are "
+            "kept, not dropped -- read them once and repair the stems in the "
+            "index rather than re-deciding them in every transcript:"
+        )
+        for key in damaged[:10]:
+            print(f"    {key}: {index['questions'][key]['stem'][:70]}")
+    return 0
+
+
 def _run_figure_extraction(args: argparse.Namespace, context: LauncherContext) -> int:
     from slide_figures import (
         DEFAULT_RESOLUTION,
@@ -1537,6 +1685,27 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="DPI for --extract-figures (default 150)",
+    )
+    parser.add_argument(
+        "--verify-provenance",
+        metavar="TRANSCRIPT",
+        help=(
+            "Check a finished transcript's badges against the module's exam "
+            "index and papers: every **[Past Exams - YYYY]** must be a year "
+            "the cited paper actually supports. Exits non-zero when a badge "
+            "claims provenance the sources do not"
+        ),
+    )
+    parser.add_argument(
+        "--build-exam-index",
+        action="store_true",
+        help=(
+            "Read the module's Questions/ papers once into Questions/"
+            "exam-index.json: every question with its options, answer, the "
+            "file and section it came from, and the year that section can "
+            "honestly claim. Drafting then looks a question up instead of "
+            "re-matching it against raw OCR text on every run"
+        ),
     )
     parser.add_argument(
         "--engine",
@@ -1708,6 +1877,10 @@ def main() -> int:
             _print_modules(discover_modules(workspace, args.modules_root))
             return 0
         context = _launcher_context(args)
+        if args.verify_provenance:
+            return _run_provenance_check(args, context)
+        if args.build_exam_index:
+            return _run_exam_index(args, context)
         if args.extract_figures:
             return _run_figure_extraction(args, context)
         if args.question_bank or args.exam:

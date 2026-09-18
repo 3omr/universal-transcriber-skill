@@ -193,7 +193,26 @@ class RenderingTests(unittest.TestCase):
         # there -- in Obsidian and on GitHub alike.
         markdown = render_reference_markdown(self._figure_set())
 
-        self.assertIn("![Organophosphates — slide 10](./Figures/Organophosphates/page-010.png)", markdown)
+        self.assertIn(
+            "![Organophosphates — slide 10](<./Figures/Organophosphates/page-010.png>)",
+            markdown,
+        )
+
+    def test_a_lecture_whose_name_has_a_space_still_links(self) -> None:
+        """A bare markdown link stops at the space in "Corrosive 1".
+
+        Obsidian read the href as "./Figures/Corrosive" and offered to create
+        it, so every figure in that lecture rendered as a broken link. Angle
+        brackets are what make the rest of the path part of the href.
+        """
+        markdown = render_reference_markdown(
+            self._figure_set(
+                lecture="Corrosive 1",
+                output_dir=Path("/m/Transcripts/Figures/Corrosive 1"),
+            )
+        )
+
+        self.assertIn("(<./Figures/Corrosive 1/page-010.png>)", markdown)
 
     def test_a_lecture_with_no_figures_produces_no_markdown(self) -> None:
         self.assertEqual(render_reference_markdown(self._figure_set(figures=())), "")

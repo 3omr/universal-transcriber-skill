@@ -48,6 +48,7 @@ class ModulePaths:
     questions: Path
     legacy_exams: Path
     transcripts: Path
+    verbatim: Path
 
     @property
     def exams(self) -> Path:
@@ -157,6 +158,11 @@ def _module_paths(module_root: Path) -> ModulePaths:
         questions=module_root / "Questions",
         legacy_exams=module_root / "Exams",
         transcripts=module_root / "Transcripts",
+        # Verbatim recordings are raw input the sections are written *from*,
+        # not output anyone reads. Kept out of Transcripts/ so that folder
+        # holds finished transcripts only -- the index, the question bank and
+        # anyone browsing the module all read it as a list of deliverables.
+        verbatim=module_root / "Verbatim",
     )
 
 
@@ -212,7 +218,22 @@ def discover_modules(workspace: Path, requested_root: str | None = None) -> list
     root = modules_root(workspace, requested_root)
     if not root.is_dir():
         raise ModuleConfigError(f"Modules directory not found: {root}")
-    modules = [load_module(path) for path in sorted(root.iterdir()) if path.is_dir()]
+    # Skip dotted directories. `.obsidian` appears the moment anyone opens the
+    # modules folder in Obsidian -- which students do, these are their notes --
+    # and reading it as a module fails the whole run on a missing module.json.
+    #
+    # Skip directories with no module.json for the same reason: a stray empty
+    # folder under modules/ made `--module toxo` die on
+    # "Missing module config: modules/Figures/module.json", naming a module
+    # nobody asked for. A real module whose config is missing now surfaces as
+    # "unknown module" from the lookup instead, which says what went wrong.
+    modules = [
+        load_module(path)
+        for path in sorted(root.iterdir())
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and (path / "module.json").is_file()
+    ]
     if not modules:
         raise ModuleConfigError(f"No modules were found under {root}")
     _validate_unique_aliases(modules)

@@ -321,7 +321,13 @@ def render_reference_markdown(figure_set: FigureSet) -> str:
         relative = (
             Path(FIGURES_DIR_NAME) / _safe_name(figure_set.lecture) / figure.image_path.name
         )
-        lines.append(f"![{figure_set.lecture} — slide {figure.page}](./{relative.as_posix()})")
+        # Angle brackets because a lecture named "Corrosive 1" puts a space in
+        # the path, and a bare markdown link stops at the space: Obsidian read
+        # "./Figures/Corrosive" and offered to create it. Every path gets them,
+        # so a lecture renamed to something with a space cannot break silently.
+        lines.append(
+            f"![{figure_set.lecture} — slide {figure.page}](<./{relative.as_posix()}>)"
+        )
     return "\n".join(lines) + "\n"
 
 
