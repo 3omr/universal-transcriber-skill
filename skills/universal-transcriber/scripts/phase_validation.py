@@ -47,39 +47,54 @@ EDITORIAL_REVIEW_MARKERS = (
     "UNRESOLVED_CONFLICT",
 )
 BROKEN_OCR_TOKEN_PATTERN = re.compile(r"\b(?:[A-Za-z]{1,3}\s+){4,}[A-Za-z]{1,3}\b")
+# Words that lost their spaces in OCR ("resultsofthe", "signsandsymptoms").
+#
+# The obvious pattern -- a function word with letters either side -- is wrong,
+# and wrong in a way that actively corrupts transcripts. It fires on any word
+# that merely CONTAINS one of these as a substring, which in medical English is
+# most of the vocabulary: radiotherapy, chemotherapy, physiotherapy,
+# brachytherapy, immunotherapy, anesthesiology, mesothelioma, synthesis,
+# hypothesis, prosthesis, Tomosynthesis. Fifteen of nineteen real terms tested
+# were flagged. A transcript of a radiology lecture could not say
+# "radiotherapy" without failing validation, and the Agent's only way out was
+# to reword correct terminology -- which is exactly what the editorial rules
+# forbid. It happened: a past-exam MCQ had "Tomosynthesis" rewritten to "DBT"
+# purely to get past this check, changing the verbatim wording of an exam
+# question.
+#
+# MEDICAL_OCR_ALLOWLIST was the previous attempt to contain this. An allowlist
+# cannot work here: no finite list covers every English or medical word
+# containing "the" or "and".
+#
+# So the test is now the signature of genuinely lost spaces rather than the
+# presence of a substring. Either:
+#   (a) two function words run together in one token ("causesofthedisease"), or
+#   (b) one function word with a word-length run of letters on BOTH sides
+#       ("diagnosisandtreatment") -- six, which every -therapy compound clears
+#       on its short side.
+# No real word satisfies either. This catches fewer run-togethers than the old
+# pattern did, and that is the right trade: a missed OCR artifact is visible to
+# the reviewing Agent, while a false positive silently rewrites medicine.
+_OCR_FUNCTION_WORDS = r"(?:of|the|and|are|from|with|except)"
 JOINED_COMMON_WORD_PATTERN = re.compile(
-    r"\b[A-Za-z]{3,}(?:of|the|and|are|from|with|except)"
-    r"[A-Za-z]{3,}\b",
+    rf"\b[A-Za-z]{{3,}}{_OCR_FUNCTION_WORDS}[A-Za-z]*{_OCR_FUNCTION_WORDS}[A-Za-z]{{2,}}\b"
+    rf"|\b[A-Za-z]{{6,}}{_OCR_FUNCTION_WORDS}[A-Za-z]{{6,}}\b",
     flags=re.IGNORECASE,
 )
 MEDICAL_OCR_ALLOWLIST = frozenset({
-    "amphetamine",
-    "amfetamine",
-    "anaesthesia",
-    "anesthesia",
-    "catheter",
-    "chemotherapy",
-    "chlorpromazine",
-    "deferoxamine",
-    "dexamethasone",
-    "diethylcarbamazine",
-    "dimercaprol",
-    "erythema",
-    "hyperthermia",
-    "hypothermia",
-    "hypothalamus",
-    "methane",
-    "neostigmine",
-    "noradrenaline",
-    "physostigmine",
-    "polyurethane",
-    "pralidoxime",
-    "promethazine",
-    "pyridostigmine",
-    "quadrant",
-    "radiotherapy",
-    "succimer",
-    "transparency",
+    # Words the joined-word heuristic still flags and should not.
+    #
+    # This list used to hold 28 entries -- catheter, erythema, quadrant,
+    # radiotherapy, chemotherapy, anesthesia, hypothalamus, noradrenaline and
+    # twenty more. None of them were exceptions. They were all symptomatic
+    # patches for a pattern that flagged any word merely containing "the" or
+    # "and", added one at a time as each was hit in a real run. Fixing the
+    # pattern made 27 of the 28 unnecessary.
+    #
+    # Keep this list tiny. If a whole family of words needs adding, the pattern
+    # has regressed -- fix that instead. tests/test_ocr_heuristics.py asserts
+    # the -therapy family never comes back here.
+    "notwithstanding",
 })
 NOTEBOOK_CITATION_PATTERN = re.compile(
     r"\[\s*\d+(?:\s*[,،、;\-–—]\s*\d+)*\s*\]"
