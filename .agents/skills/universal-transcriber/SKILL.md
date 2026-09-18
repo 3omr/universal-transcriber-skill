@@ -106,6 +106,17 @@ Three rules the index encodes, and no filename can:
 Questions the scan destroyed are listed at the end of the run. **Repair them
 once, in the index**, and add `"repaired_by_hand": "<what you read off the
 page>"` to the entry — rebuilds carry those forward instead of discarding them.
+A repair **replaces** the parsed entry and inherits every year that entry
+carried, so fixing one copy of a question asked twice gives you both years.
+
+> [!IMPORTANT]
+> **Check the OCR before trusting a low question count.** If a paper indexes far
+> fewer questions than it has, or the stems read as noise, the `.txt` beside it
+> is bad OCR, not a bad parser. Re-run it at a resolution tesseract can read —
+> `pdftoppm -r 400 -png` then `tesseract <page> - -l eng --psm 6` per page — and
+> rebuild. One module's papers went from unusable to 603 indexed questions on
+> this alone; `pdftotext` on a scan returns whatever layer is already embedded,
+> which for a phone photo of an exam paper is often garbage.
 
 ### 3. Draft & Agent In-Flight Repair
 

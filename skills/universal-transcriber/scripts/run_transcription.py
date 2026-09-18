@@ -1156,27 +1156,75 @@ def _execute_selected(
     return 0
 
 
+AUDIO_SUFFIXES = frozenset(
+    {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".mp4", ".mkv"}
+)
+
+
+def _remote_recording(args: argparse.Namespace, context: LauncherContext) -> Path:
+    """The recording named by --lecture, found in the notebook rather than on disk.
+
+    notebooklm-raw never opens the audio -- it reads back the transcript
+    NotebookLM already made -- so a module whose recordings live only in the
+    notebook is not missing anything this engine needs. The returned Path is a
+    name, not a file: the engine matches it against the remote source titles.
+    """
+    from nlm_client import list_remote_sources
+
+    notebook_id = context.module.notebook.notebook_id
+    if not notebook_id:
+        raise LauncherError(
+            f"No recording under {context.module.paths.lecture} matches "
+            f"{args.lecture!r}, and the module names no notebook to look in."
+        )
+    wanted = normalize_module_name(args.lecture)
+    audio = [
+        source
+        for source in list_remote_sources(notebook_id, context.config)
+        if source.source_type.casefold() in {"audio", "video"}
+    ]
+    matches = [
+        source for source in audio if wanted in normalize_module_name(source.title)
+    ]
+    if not matches:
+        known = ", ".join(sorted(s.title for s in audio)) or "none"
+        raise LauncherError(
+            f"Nothing named {args.lecture!r} is on disk or in the notebook. "
+            f"Audio in the notebook: {known}"
+        )
+    if len(matches) > 1:
+        names = ", ".join(sorted(s.title for s in matches))
+        raise LauncherError(f"{args.lecture!r} matches several recordings: {names}")
+    return Path(matches[0].title)
+
+
 def _transcription_recording(
     args: argparse.Namespace, context: LauncherContext
 ) -> Path:
-    """The recording to transcribe: --lecture matched against Lecture/."""
+    """The recording to transcribe: --lecture matched against Lecture/.
+
+    Falls back to the notebook for engines that read the transcript remotely,
+    which is the documented "remote-only mode" -- audio uploaded once, never
+    kept locally.
+    """
+    from engines import NOTEBOOKLM_RAW
+
     lecture_dir = context.module.paths.lecture
     if not args.lecture:
         raise LauncherError(
             f"--engine {args.engine} needs --lecture naming the recording"
         )
     wanted = normalize_module_name(args.lecture)
-    candidates = [
-        path
-        for path in sorted(lecture_dir.glob("*"))
-        if path.is_file() and wanted in normalize_module_name(path.stem)
-    ]
     recordings = [
         path
-        for path in candidates
-        if path.suffix.casefold() in {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".mp4", ".mkv"}
+        for path in sorted(lecture_dir.glob("*"))
+        if path.is_file()
+        and wanted in normalize_module_name(path.stem)
+        and path.suffix.casefold() in AUDIO_SUFFIXES
     ]
     if not recordings:
+        if args.engine == NOTEBOOKLM_RAW:
+            return _remote_recording(args, context)
         raise LauncherError(f"No recording under {lecture_dir} matches {args.lecture!r}")
     if len(recordings) > 1:
         names = ", ".join(path.name for path in recordings)

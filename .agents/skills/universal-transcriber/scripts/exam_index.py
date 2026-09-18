@@ -55,6 +55,39 @@ OPTION_START = re.compile(
     r"^\s*(?P<mark>[+<#=*✓✔]?)\s*[(\[]?(?P<key>[a-dA-D])\s*[.)\]]\s*(?P<text>.*)$"
 )
 ANSWER_MARKS = "+<#=*✓✔"
+# The margin of a scanned paper OCRs as punctuation on the front of the line --
+# the page border becomes "|", a speck becomes "," or "!". Left there it stops
+# "| 12) MLI of cannabis" from reading as question 12, and the parser then feeds
+# the next question's text into the previous one: two entries were found holding
+# a *different* question's options, which is worse than holding none.
+GUTTER = re.compile(r"^[\s|!;,:'\"`\u2018\u2019\u201c\u201d~^\u00b7]+")
+# One option label anywhere in a line. These papers routinely print all four on
+# a single line ("a. Naloxone, b) Physostigmine C. Neostigmine. d. charcoal."),
+# and matching only at the start kept the first and lost the rest.
+OPTION_TOKEN = re.compile(
+    r"(?:^|[\s,;|/.)\]])"
+    r"(?P<mark>[+<#=*✓✔])?\s*"
+    r"(?P<open>[(\[])?\s*"
+    r"(?P<key>[a-dA-D])\s*"
+    r"(?P<dot>[.)\]])"
+)
+# The examiner rings the correct answer in pen. The scan renders that ring as
+# brackets around the label -- "(a) Green" beside a bare "b. Black" -- or, when
+# it swallows the letter, as "@ Disseminated intravascular coagulopathy".
+# An option whose *label* the scan destroyed, which is most of what is left
+# after the runs above: "Ce Pilutional therapy", "S, Alkaline potash", "cd.
+# Nitric acid", ". Gastric lavage", "#@)Asphyxia from laryngeal edema". The
+# prose is perfectly readable; only the letter in front of it is gone. Which
+# letter it was is not a guess -- it is the one missing from a run of four.
+# The damage itself is the guard: a line that begins with a plain word is an
+# option wrapping onto a second line, and must not be taken for a new one.
+LOST_LABEL = re.compile(
+    r"^\s*(?:(?P<mark>[+<#=*✓✔@\u00a9\u00ae\u25cb\u25ce])\s*)?"
+    r"(?:[^\w\s]{1,3}\s*|(?P<letters>[A-Za-z0-9]{1,2})(?:\s*[.,)\]]\s*|\s+(?=[A-Z])))*"
+    r"(?P<text>[A-Za-z(\"].{3,})$"
+)
+LOST_LABEL_MARKS = "+<#=*✓✔@\u00a9\u00ae\u25cb\u25ce"
+OPTION_KEYS = "abcd"
 MODEL_ANSWER = re.compile(r"^\s*model answer\s*:?\s*(.*)$", re.IGNORECASE)
 # Egyptian exam papers leave the answer space as a run of dot leaders. Left on
 # the stem they are invisible to a reader and decisive to a matcher: the same
@@ -154,6 +187,48 @@ def _legible(text: str) -> bool:
     return words / len(tokens) >= MIN_LEGIBLE_RATIO
 
 
+def _option_run(line: str, taken: str) -> list[tuple[str, str, bool]]:
+    """Every option on this line, as (key, text, ringed).
+
+    A line is only read as options if it *starts* with a label and the labels
+    run in order -- "a. ... b. ... c. ..." -- which is what keeps a sentence
+    ending in "vitamin B." from being mistaken for option b.
+
+    `ringed` is the examiner's pen: a label in brackets where its neighbours
+    have none. It is reported per option rather than decided here, because one
+    ringed option among four is an answer key and four ringed options are just
+    how that scan prints brackets.
+    """
+    matches = list(OPTION_TOKEN.finditer(line))
+    if not matches or matches[0].start("key") > 2:
+        return []
+    run: list[tuple[str, str, bool]] = []
+    previous = ""
+    for position, match in enumerate(matches):
+        key = match.group("key").casefold()
+        expected = taken and key in OPTION_KEYS[OPTION_KEYS.index(taken[-1]) + 1 :]
+        if key <= previous or (not run and not (key == "a" or expected)):
+            break
+        end = (
+            matches[position + 1].start()
+            if position + 1 < len(matches)
+            else len(line)
+        )
+        text = line[match.end() : end].lstrip(")] \t").strip()
+        ringed = bool(match.group("open")) or bool(match.group("mark"))
+        run.append((key, text, ringed))
+        previous = key
+    return run
+
+
+def _next_key(taken: str) -> str | None:
+    """The label a ringed option must have carried, when the scan ate it."""
+    if not taken:
+        return OPTION_KEYS[0]
+    position = OPTION_KEYS.index(taken[-1]) + 1
+    return OPTION_KEYS[position] if position < len(OPTION_KEYS) else None
+
+
 def _section_year(
     section: Section, source_name: str, compiled: bool
 ) -> int | None:
@@ -171,7 +246,8 @@ def parse_source(source_name: str, text: str) -> list[IndexedQuestion]:
         current: IndexedQuestion | None = None
         collecting_model_answer = False
         counter = 0
-        for line in text[section.start : section.end].splitlines():
+        for raw_line in text[section.start : section.end].splitlines():
+            line = GUTTER.sub("", raw_line).rstrip()
             start = QUESTION_START.match(line)
             bullet = BULLET_START.match(line)
             option = OPTION_START.match(line)
@@ -207,18 +283,43 @@ def parse_source(source_name: str, text: str) -> list[IndexedQuestion]:
                 if line.strip():
                     current.model_answer = f"{current.model_answer} {line.strip()}".strip()
                 continue
-            if option and option.group("text").strip():
-                key = option.group("key").casefold()
-                current.options[key] = option.group("text").strip()
-                if option.group("mark") in ANSWER_MARKS and option.group("mark"):
-                    current.answer = key
-                continue
-            if option and not option.group("text").strip():
-                # "A." alone on its line: the text is the next line. Papers
-                # exported from PDF do this constantly.
-                current.options.setdefault(option.group("key").casefold(), "")
-                if option.group("mark") in ANSWER_MARKS and option.group("mark"):
-                    current.answer = option.group("key").casefold()
+            lost = LOST_LABEL.match(line)
+            # Something must actually be damaged for this to be a lost label:
+            # a pen mark, a misread letter, or punctuation where the label was.
+            # A line opening on a plain word is an option wrapping, not a new one.
+            if lost and not (
+                lost.group("mark") or lost.group("letters") or not line.lstrip()[:1].isalnum()
+            ):
+                lost = None
+            if lost and current.options and len(current.options) < len(OPTION_KEYS):
+                key = _next_key("".join(sorted(current.options)))
+                if key:
+                    current.options[key] = lost.group("text").strip()
+                    # A pen-ring or a "+" survived the label it was drawn on:
+                    # that is still the paper telling us the answer.
+                    if any(c in LOST_LABEL_MARKS for c in lost.group("mark") or ""):
+                        current.answer = key
+                    continue
+            run = _option_run(line, "".join(sorted(current.options)))
+            if run:
+                ringed = [key for key, _, is_ringed in run if is_ringed]
+                # A single ringed label reading as one the question already has
+                # is the scan mangling a later letter, not the paper repeating
+                # itself. Overwriting here is how option (a) once ended up
+                # holding "All of the above".
+                if len(run) == 1 and run[0][0] in current.options:
+                    run = []
+                for key, text_part, _ in run:
+                    if text_part or key not in current.options:
+                        current.options[key] = text_part
+                # One ringed option among several is the answer key. All of them
+                # ringed is just how that scan draws brackets, and so tells us
+                # nothing. An option alone on its line only counts when it
+                # carries a real answer mark rather than brackets.
+                several = len(ringed) == 1 and len(run) > 1
+                alone = len(run) == 1 and ringed and option and option.group("mark")
+                if several or alone:
+                    current.answer = ringed[0]
                 continue
             if line.strip() and current.options:
                 # Continuation of the last option that was left empty.
@@ -227,7 +328,13 @@ def parse_source(source_name: str, text: str) -> list[IndexedQuestion]:
                         current.options[key] = line.strip()
                         break
                 else:
-                    pass
+                    # Nothing empty to fill, so this is the last option running
+                    # onto a second line. Dropping it truncated the option at
+                    # the line break, which reads as a different answer.
+                    last = list(current.options)[-1]
+                    current.options[last] = (
+                        f"{current.options[last]} {line.strip()}".strip()
+                    )
             elif line.strip() and not current.options:
                 if PAPER_HEADING.match(line):
                     questions.append(current)
@@ -340,15 +447,115 @@ def carry_over_repairs(
     }
     if not repaired:
         return fresh
-    known = {
-        " ".join(normalize(question["stem"])[:12])
-        for question in fresh["questions"].values()
+    by_stem = {
+        " ".join(normalize(question["stem"])[:12]): key
+        for key, question in fresh["questions"].items()
     }
     for key, question in repaired.items():
-        if " ".join(normalize(question["stem"])[:12]) not in known:
-            fresh["questions"][key] = question
+        # The repair replaces what the parser produced. Keeping the fresh entry
+        # instead was the old behaviour and it silently discarded every repair:
+        # repairing a question rewrites its stem, so the rebuilt copy no longer
+        # looks like the repaired one and the "only if missing" rule never
+        # fired. Every copy is absorbed, not just the first -- a question asked
+        # in two years reaches the rebuild as two entries, and the repair must
+        # come away carrying both years.
+        for match in _rebuilt_counterparts(question, fresh["questions"], by_stem):
+            _absorb(question, fresh["questions"].pop(match))
+        # Remembering the stem it was repaired from lets the next rebuild find
+        # it by name instead of by resemblance.
+        question.setdefault(
+            "repaired_from",
+            " ".join(normalize(question["stem"])[:12]),
+        )
+        fresh["questions"][key] = question
     fresh["carried_repairs"] = sorted(repaired)
+    _collapse_duplicates(fresh["questions"])
     return fresh
+
+
+def _collapse_duplicates(questions: dict[str, dict[str, Any]]) -> None:
+    """Fold entries that a repair has just revealed to be the same question.
+
+    Two copies of one question can reach the index looking different -- one
+    stem carrying its mark allocation, the other its own options -- and so miss
+    the merge at build time. Repairing them makes them identical, and they must
+    then carry *both* years: that is the difference between a badge reading
+    2023 and one reading 2023, 2025.
+    """
+    seen: dict[str, str] = {}
+    for key in list(questions):
+        question = questions[key]
+        stem_key = " ".join(normalize(question["stem"])[:12])
+        if not stem_key:
+            continue
+        first = seen.get(stem_key)
+        if first is None:
+            seen[stem_key] = key
+            continue
+        kept = questions[first]
+        occurrences = kept.get("occurrences", []) + question.get("occurrences", [])
+        unique = {
+            (o.get("source"), o.get("section"), o.get("year")): o for o in occurrences
+        }
+        kept["occurrences"] = list(unique.values())
+        kept["years"] = sorted({o["year"] for o in kept["occurrences"] if o.get("year")})
+        kept["sources"] = sorted({o["source"] for o in kept["occurrences"]})
+        kept["answer"] = kept.get("answer") or question.get("answer")
+        del questions[key]
+
+
+def _option_fingerprint(question: dict[str, Any]) -> set[str]:
+    """What a question's options say, ignoring how the scan spelled it."""
+    return {
+        " ".join(normalize(text)[:6])
+        for text in (question.get("options") or {}).values()
+        if text and len(normalize(text)) >= 2
+    }
+
+
+def _absorb(repaired: dict[str, Any], superseded: dict[str, Any]) -> None:
+    """Give the repaired entry the papers the copy it replaces was found in."""
+    occurrences = repaired.get("occurrences", []) + superseded.get("occurrences", [])
+    unique = {
+        (o.get("source"), o.get("section"), o.get("year")): o for o in occurrences
+    }
+    repaired["occurrences"] = list(unique.values())
+    repaired["years"] = sorted({o["year"] for o in unique.values() if o.get("year")})
+    repaired["sources"] = sorted({o["source"] for o in unique.values()})
+
+
+def _rebuilt_counterparts(
+    repaired: dict[str, Any],
+    fresh: dict[str, dict[str, Any]],
+    by_stem: dict[str, str],
+) -> list[str]:
+    """The freshly parsed entry a hand-repaired one supersedes, if any.
+
+    Identity has to survive the repair itself. The stem is the natural key and
+    is tried first -- including the stem the entry was repaired *from*, which
+    later rebuilds carry -- but a repair that rewrote the stem is exactly the
+    case where that fails, so the options are the fallback: OCR damages the
+    letter in front of an option far more often than the words in it.
+    """
+    matches: list[str] = []
+    for candidate in (
+        repaired.get("repaired_from"),
+        " ".join(normalize(repaired["stem"])[:12]),
+    ):
+        if candidate and by_stem.get(candidate) not in (None, *matches):
+            matches.append(by_stem[candidate])
+    wanted = _option_fingerprint(repaired)
+    if len(wanted) >= 2:
+        for key, question in fresh.items():
+            if key in matches:
+                continue
+            found = _option_fingerprint(question)
+            if not found:
+                continue
+            overlap = len(wanted & found) / max(len(wanted), len(found))
+            if overlap >= 0.6:
+                matches.append(key)
+    return matches
 
 
 def write_index(index: dict[str, Any], questions_dir: Path) -> Path:

@@ -113,6 +113,86 @@ class ExamIndexTests(unittest.TestCase):
         self.assertEqual(len(loaded["questions"]), 1)
         self.assertTrue(next(iter(loaded["questions"])).startswith("radio-"))
 
+    def test_a_hand_repair_survives_the_next_rebuild(self) -> None:
+        """The repair replaces what the parser produced, not the other way round.
+
+        Repairing a question rewrites its stem, so the rebuilt copy stops
+        looking like the repaired one -- and a rule that kept repairs only when
+        the question was *missing* therefore discarded every one of them. The
+        entry has to be matched by what the repair could not change: what its
+        options say.
+        """
+        paper = (
+            "1. The following are considered in the treatment of corrosive:-\n"
+            "a. Neutralizing agent.\n"
+            "b. Charcoal.\n"
+            "Ce Pilutional therapy.\n"
+            ". Gastric lavage.\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            questions_dir = Path(directory)
+            (questions_dir / "End Toxico 2023.txt").write_text(paper, encoding="utf-8")
+            first = exam_index.build_index(questions_dir, "toxo")
+            key = next(iter(first["questions"]))
+            first["questions"][key]["stem"] = (
+                "The following are considered in the treatment of corrosive:"
+            )
+            first["questions"][key]["options"]["c"] = "Dilutional therapy."
+            first["questions"][key]["answer"] = "c"
+            first["questions"][key]["repaired_by_hand"] = "read off the scan"
+            exam_index.write_index(first, questions_dir)
+
+            rebuilt = exam_index.carry_over_repairs(
+                exam_index.build_index(questions_dir, "toxo"), questions_dir
+            )
+
+        surviving = [
+            q for q in rebuilt["questions"].values() if q.get("repaired_by_hand")
+        ]
+        self.assertEqual(len(surviving), 1)
+        self.assertEqual(surviving[0]["answer"], "c")
+        self.assertEqual(surviving[0]["options"]["c"], "Dilutional therapy.")
+        # And it replaced the parsed copy rather than sitting beside it.
+        self.assertEqual(len(rebuilt["questions"]), 1)
+
+    def test_all_four_options_survive_one_line_and_a_ruined_label(self) -> None:
+        """Two things these scans do constantly, which cost three options each.
+
+        The papers print all four options on one line, and the examiner's pen
+        ring destroys the letter it is drawn on. Reading only a label at the
+        start of a line kept the first option and lost the rest -- and worse,
+        the unparsed lines fell through into the *next* question, which ended
+        up indexed holding another question's options.
+        """
+        paper = (
+            "1. Cause of death in corrosive within 24 hours from:-\n"
+            "a) Septic peritonitis. b) Collapse and dehydration from vomiting.\n"
+            "#@)Asphyxia from laryngeal or glottic edema.\n"
+            "d) None of the above.\n"
+        )
+        question = exam_index.parse_source("End 2025.txt", paper)[0]
+        self.assertEqual(sorted(question.options), ["a", "b", "c", "d"])
+        self.assertIn("Collapse", question.options["b"])
+        self.assertIn("Asphyxia", question.options["c"])
+        self.assertEqual(question.answer, "c")
+
+    def test_a_wrapped_option_is_not_read_as_a_new_one(self) -> None:
+        """The guard on the rule above: damage is what marks a lost label.
+
+        An option long enough to wrap onto a second line begins with a plain
+        word. Treating that as the next option would invent an option the paper
+        never printed, which is the same lie as dropping one.
+        """
+        paper = (
+            "1. Indications for mechanical ventilation:-\n"
+            "a. Respiratory arrest (apnea), severe hypoxemia not responding\n"
+            "to a high flow rate of oxygen by mask.\n"
+            "b. Shock.\n"
+        )
+        question = exam_index.parse_source("End 2018.txt", paper)[0]
+        self.assertEqual(sorted(question.options), ["a", "b"])
+        self.assertIn("high flow rate", question.options["a"])
+
     def test_missing_index_says_how_to_build_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(exam_index.ExamIndexError) as raised:
