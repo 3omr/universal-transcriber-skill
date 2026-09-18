@@ -43,6 +43,39 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Every `**Name:**` that is a *field* of a question block. Nothing else is,
+# however much it looks like one.
+#
+# Both readers used to end a field at the next line starting `**...**`, which
+# meant a heading the author wrote *inside* an answer closed it: a Model Answer
+# opening on `**Small bowel:**` parsed as empty, and one containing
+# `**ملحوظة:**` halfway down was truncated there -- silently, because the field
+# still held text, so validation passed on an answer missing its last three
+# points. `**كلمة:**` is ordinary writing in a medical answer (`**Early:**` /
+# `**Late:**`, `**استثناء:**`), so the boundary has to be this list rather than
+# the shape of the line.
+FIELD_NAMES: tuple[str, ...] = (
+    "Question",
+    "Question (verbatim)",
+    "Options",
+    "Options (verbatim)",
+    "Correct Answer",
+    "Model Answer",
+    "Model Answer (Short)",
+    "Clinical Explanation",
+    "Clinical Explanation (Egyptian Arabic)",
+    "Explanation",
+    "Scenario",
+    "Questions",
+    "Source",
+    "Answer",
+)
+# Longest first: "Model Answer (Short)" must win over "Model Answer", or the
+# alternation stops at the shorter name and leaves " (Short):**" in the body.
+FIELD_NAME_PATTERN = "|".join(
+    re.escape(name) for name in sorted(FIELD_NAMES, key=len, reverse=True)
+)
+
 # Section keys, in document order.
 GUIDE = "guide"
 IMP = "imp"
@@ -229,7 +262,9 @@ def field_value(block: str, name: str) -> str:
     verbatim past-exam wording and the engine labels those fields accordingly.
     """
     pattern = re.compile(
-        rf"\*\*{re.escape(name)}\s*(?:\(verbatim\))?\s*:\*\*\s*(.+?)(?=\n\*\*|\n---|\Z)",
+        rf"\*\*{re.escape(name)}\s*(?:\(verbatim\))?\s*:\*\*\s*(.+?)"
+        rf"(?=\n[ \t]*(?:>[ \t]*)?\*\*(?:{FIELD_NAME_PATTERN})"
+        rf"[ \t]*(?:\(verbatim\))?[ \t]*:\*\*|\n---|\Z)",
         re.DOTALL,
     )
     match = pattern.search(block)

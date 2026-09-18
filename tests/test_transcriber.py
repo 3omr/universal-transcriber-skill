@@ -2493,6 +2493,59 @@ class TranscriberTests(unittest.TestCase):
         self.assertNotIn("(Short)", normalized)
         self.assertNotIn("(Egyptian Arabic)", normalized)
 
+    def test_a_heading_inside_a_model_answer_keeps_the_whole_answer(self) -> None:
+        """The silent half of the field-label collision.
+
+        `**ملحوظة:**` on its own line used to end the Model Answer, so the
+        points after it were dropped -- and validation passed, because a field
+        holding text is not a missing one. The answer below must survive whole,
+        and the block must still validate.
+        """
+        answer = (
+            "### Question 1 **[Past Exams - 2022]**\n\n"
+            "**Question:** Outline the treatment of corrosive poisoning.\n"
+            "**Source:** Exam 2022.pdf\n"
+            "**Model Answer:**\n"
+            "1- ABC — airway, breathing, circulation\n"
+            "**ملحوظة:** الـ gastric lavage ممنوع تمامًا هنا.\n"
+            "2- Dilution — milk and water\n"
+            "3- Anti-shock measures\n"
+            "4- Antibiotics\n"
+            "**Clinical Explanation:** الدكتور سمّى الغسيل هنا vital mistake."
+        )
+        evidence = engine.QuestionEvidence({2022: ["Exam 2022.pdf"]}, ["Exam 2022.pdf"])
+
+        self.assertEqual(
+            engine.validate_written(engine.QueryResult(answer, ["Exam 2022.pdf"]), evidence),
+            [],
+        )
+        model_answer = engine._field_content(answer, "Model Answer")
+        self.assertIn("Antibiotics", model_answer)
+        self.assertIn("ملحوظة", model_answer)
+        self.assertNotIn("vital mistake", model_answer)
+
+    def test_a_heading_opening_a_model_answer_does_not_empty_it(self) -> None:
+        """The loud half: the field parsed as the empty string.
+
+        A Model Answer whose first line was `**Small bowel:**` reported as a
+        missing field, which is what sent a writer round the problem with a
+        table instead of fixing the boundary.
+        """
+        answer = (
+            "### Question 1 **[IMP]**\n\n"
+            "**Question:** Mention the causes of intestinal obstruction.\n"
+            "**Model Answer:**\n"
+            "**Small bowel:** adhesions, hernia, intussusception\n"
+            "**Large bowel:** carcinoma, volvulus, diverticulitis\n"
+            "**Clinical Explanation:** الفرق بين الاتنين بيتحدد بمكان الانسداد."
+        )
+
+        model_answer = engine._field_content(answer, "Model Answer")
+
+        self.assertIn("Small bowel", model_answer)
+        self.assertIn("diverticulitis", model_answer)
+        self.assertNotIn("مكان الانسداد", model_answer)
+
     def test_clinical_cases_standard_headings_and_clean_format(self) -> None:
         answer = (
             "### Clinical Case 1 **[Past Exams - 2022]**\n\n"
