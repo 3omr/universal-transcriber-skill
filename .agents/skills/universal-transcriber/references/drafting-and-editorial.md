@@ -87,12 +87,20 @@ Format every MCQ with clean Markdown field labels and valid badges:
 
 - **Option Labels**: Unordered list with lowercase bold letters (`- **a.**`, `- **b.**`, `- **c.**`, `- **d.**`).
 - **Spacing**: Always leave a blank line (`\n\n`) before `**Correct Answer:**`.
-- **`**Source:**` — required**: every question carrying a `Past Exams` or
-  `Question Bank` badge needs one `**Source:**` line per supporting source,
-  naming the file exactly as it appears in `Questions/` — bare filename, no
-  parenthetical section names. A block badged only `**[IMP]**` needs none,
-  because the recording is its source. This is enforced: a badged block without
-  it fails validation with `[missing_source]`.
+- **Provenance comes from `Questions/exam-index.json`, never from your own
+  reading of the papers.** Copy the stem, the options, the answer key and the
+  years out of the index entry. Do not retype a question, do not decide a year
+  by looking at a filename, and do not write a badge a lookup did not give you.
+  Build the index first (`--build-exam-index`); a module without one cannot be
+  drafted honestly.
+- **`**Source:**` is optional once the index exists.** It was how a badge was
+  made checkable before there was an index; now the index records provenance
+  per question — paper *and* section — and validation accepts an indexed
+  question without it. Repeating the same filename under every question puts
+  bookkeeping in front of the student. Keep a `**Source:**` line only for a
+  question the index does not know, where it is the only record of where the
+  question came from; a block badged only `**[IMP]**` never carries one, and
+  fails with `[source_role_mismatch]` if it does.
 - **Badges**:
   - `**[Past Exams - 2023]**`
   - `**[Past Exams - 2021, 2022, 2023]**`
@@ -101,6 +109,26 @@ Format every MCQ with clean Markdown field labels and valid badges:
   - `**[Past Exams (2022) / IMP]**` — note the **parentheses**: the combined
     form is `(YYYY)`, not `- YYYY`, and it additionally requires the recording
     to be cited or named in a `**Source:**` line
+
+> [!WARNING]
+> **A year badge is a promise to a student revising by it.** `**[Past Exams -
+> 2022]**` says *this exact question was on the 2022 paper*. Write it only when
+> the index says so.
+>
+> Two ways that goes wrong, both of which have shipped:
+>
+> 1. **A question that was never on a paper.** Six clinical cases once carried
+>    `**[Past Exams - 2022, 2023]**` on vignettes that existed in no paper at
+>    all — their *topics* came from short essays, which is not the same claim.
+>    Most papers in these modules have no clinical-case section: they are MCQs
+>    and short essays. A case you built to tie the lecture together is
+>    `**[IMP]**`, and the section should say plainly that it was built.
+> 2. **A year read off a filename.** `Radiology_Exams_2026.txt` is a *compiled
+>    bank* holding 2021-2025 papers; a question in it is `**[Question Bank]**`
+>    unless its own section names a year. Nothing in it is a 2026 question.
+>
+> Before finalizing, run `--verify-provenance` on the transcript. It holds every
+> year badge against the paper it names and exits non-zero on an unbacked claim.
 
 ---
 

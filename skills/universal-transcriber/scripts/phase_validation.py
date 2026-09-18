@@ -24,6 +24,7 @@ from engine_utils import _catalog_entry_is_available, _unique_strings, is_empty_
 from exam_years import ARABIC_DIGITS, is_reasonable_exam_year
 from output_assembly import format_markdown_tables
 from question_prompts import IMP_HEADINGS, NO_MCQS, NO_WRITTEN
+from provenance_audit import index_years
 from source_naming import normalize_source_key, normalize_source_stem
 from transcriber_models import (
     CaseEvidence,
@@ -153,7 +154,29 @@ def _badge_is_valid(badge: str, verified_years: set[int]) -> bool:
     )
 
 
-def _badge_errors(text: str, verified_years: set[int]) -> list[str]:
+def _index_verified_years(evidence: QuestionEvidence | None) -> set[int]:
+    """Every year the module's exam index records, across all its questions.
+
+    The file-level year map is built from the manifest and describes files. A
+    badge is about a question, and for a compiled bank the two disagree: the
+    index is what actually read the papers.
+    """
+    index = getattr(evidence, "exam_index", None) if evidence else None
+    if not index:
+        return set()
+    return {
+        year
+        for question in index.get("questions", {}).values()
+        for year in question.get("years", ())
+    }
+
+
+def _badge_errors(
+    text: str,
+    verified_years: set[int],
+    evidence: QuestionEvidence | None = None,
+) -> list[str]:
+    verified_years = verified_years | _index_verified_years(evidence)
     invalid = [
         match.group(0)
         for match in BADGE_LIKE_PATTERN.finditer(text)
@@ -334,6 +357,7 @@ def _ungrounded_block_errors(
     blocks = _section_blocks(answer, heading_prefix)
     if len(blocks) == expected_count and all(
         "**[IMP]**" in block
+        or _indexed(block, evidence)
         or _source_field_matches(block, evidence.evidence_sources)
         or any(
             _catalog_entry_is_available(entry)
@@ -374,11 +398,27 @@ def _block_year_errors(
     heading_prefix: str,
     year_map: dict[int, list[str]],
     evidence_catalog: list[dict[str, Any]] | None = None,
+    evidence: QuestionEvidence | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    index = getattr(evidence, "exam_index", None) if evidence else None
     for block in _section_blocks(answer, heading_prefix):
         number = _question_number(block, heading_prefix)
         claimed_years = _badge_years(block)
+        if index:
+            stem = _question_content(block)
+            known = index_years(stem, index) if stem else None
+            if known is not None:
+                # The index read the papers question by question; a file-level
+                # year map cannot second-guess it.
+                unbacked = sorted(claimed_years - set(known))
+                if unbacked:
+                    errors.append(
+                        f"{heading_prefix} {number} [source_year_mismatch]: claimed "
+                        f"years {sorted(claimed_years)}; the exam index records "
+                        f"{sorted(known)}"
+                    )
+                continue
         source_years: set[int] = set()
         for source_field in _source_fields(block):
             years, _roles, _matches = _source_evidence(
@@ -496,9 +536,45 @@ def _question_role_provenance_errors(
     return errors
 
 
+def _indexed_year_errors(
+    context: QuestionProvenanceContext,
+) -> list[str] | None:
+    """Year check against the index, when the index knows this question.
+
+    Returns None when it does not, so the caller falls back to the file-level
+    year map. The index is preferred because it answers per question: a file
+    map can only say "this file contains 2021 through 2025", which for a
+    compiled bank makes every question in it claim every year the bank holds.
+    """
+    index = getattr(context.evidence, "exam_index", None)
+    if not index:
+        return None
+    stem = _question_content(context.block)
+    known = index_years(stem, index) if stem else None
+    if known is None:
+        return None
+    claimed: set[int] = set()
+    for badge in context.badges:
+        claimed.update(
+            int(year) for year in re.findall(r"20\d{2}", badge)
+        )
+    unbacked = sorted(claimed - set(known))
+    if unbacked:
+        return [
+            f"{context.heading_prefix} {context.number} [source_year_mismatch]: "
+            f"claims {sorted(claimed)}; the exam index records {sorted(known)}"
+        ]
+    return []
+
+
 def _question_badge_provenance_errors(
     context: QuestionProvenanceContext,
 ) -> list[str]:
+    indexed = _indexed_year_errors(context)
+    if indexed is not None:
+        # The index settles this question's provenance; the file-level year map
+        # can only over- or under-claim it.
+        return indexed + _question_role_provenance_errors(context, ())
     field_errors, evidenced_years, roles = _source_field_errors(
         _source_fields(context.block),
         context.heading_prefix,
@@ -528,7 +604,9 @@ def _question_provenance_errors(
         sourced_badge = any(
             "Past Exams" in badge or "Question Bank" in badge for badge in badges
         )
-        if (not is_imp or sourced_badge) and not source_fields:
+        if (not is_imp or sourced_badge) and not source_fields and not _indexed(
+            block, evidence
+        ):
             errors.append(
                 f"{heading_prefix} {number} [missing_source]: sourced question has no Source field"
             )
@@ -1118,7 +1196,22 @@ def validate_editorial_quality(
     return errors
 
 
-def _mcq_field_errors(answer: str) -> list[str]:
+def _indexed(block: str, evidence: QuestionEvidence) -> bool:
+    """True when the exam index already records this question's provenance.
+
+    A `**Source:**` line exists to make a badge checkable. Once the module has
+    an index, the index is where that check happens -- per question, naming the
+    paper *and* the section -- and repeating a filename in every block only
+    puts a machine's bookkeeping in front of the student reading it.
+    """
+    index = getattr(evidence, "exam_index", None)
+    if not index:
+        return False
+    stem = _question_content(block)
+    return bool(stem) and index_years(stem, index) is not None
+
+
+def _mcq_field_errors(answer: str, evidence: QuestionEvidence) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "MCQ"):
         number = _question_number(block, "MCQ")
@@ -1135,11 +1228,12 @@ def _mcq_field_errors(answer: str) -> list[str]:
         if not has_explanation:
             errors.append(f"MCQ {number} [missing_field]: missing **Clinical Explanation:**")
         if "**[IMP]**" not in block and "**Source:**" not in block:
-            errors.append(f"MCQ {number} [missing_source]: missing **Source:**")
+            if not _indexed(block, evidence):
+                errors.append(f"MCQ {number} [missing_source]: missing **Source:**")
     return errors
 
 
-def _written_field_errors(answer: str) -> list[str]:
+def _written_field_errors(answer: str, evidence: QuestionEvidence) -> list[str]:
     errors: list[str] = []
     for block in _section_blocks(answer, "Question"):
         number = _question_number(block, "Question")
@@ -1154,7 +1248,10 @@ def _written_field_errors(answer: str) -> list[str]:
                 f"Question {number} [missing_field]: missing **Model Answer:**"
             )
         if "**[IMP]**" not in block and "**Source:**" not in block:
-            errors.append(f"Question {number} [missing_source]: missing **Source:**")
+            if not _indexed(block, evidence):
+                errors.append(
+                    f"Question {number} [missing_source]: missing **Source:**"
+                )
     return errors
 
 
@@ -1181,12 +1278,14 @@ def validate_mcqs(
     answer = query_result.answer
     errors = _body_heading_errors(answer)
     errors += _callout_errors(answer)
-    errors += _badge_errors(answer, set(evidence.year_map))
-    errors += _question_badge_errors(answer, "MCQ", set(evidence.year_map))
+    errors += _badge_errors(answer, set(evidence.year_map), evidence)
+    errors += _question_badge_errors(
+        answer, "MCQ", set(evidence.year_map) | _index_verified_years(evidence)
+    )
     question_count = len(_section_blocks(answer, "MCQ"))
     if question_count < 1:
         errors.append("MCQ response has no question blocks")
-    errors += _mcq_field_errors(answer)
+    errors += _mcq_field_errors(answer, evidence)
     if len(re.findall(r"[\u0600-\u06ff]", answer)) < 20:
         errors.append("MCQ clinical explanations are not in Egyptian Arabic")
     if len(BADGE_LIKE_PATTERN.findall(answer)) < question_count:
@@ -1195,7 +1294,7 @@ def validate_mcqs(
         answer, "MCQ", evidence, question_count
     )
     errors += _block_year_errors(
-        answer, "MCQ", evidence.year_map, evidence.evidence_catalog
+        answer, "MCQ", evidence.year_map, evidence.evidence_catalog, evidence
     )
     errors += _question_provenance_errors(
         answer,
@@ -1293,19 +1392,21 @@ def validate_written(
     answer = query_result.answer
     errors = _body_heading_errors(answer)
     errors += _callout_errors(answer)
-    errors += _badge_errors(answer, set(evidence.year_map))
-    errors += _question_badge_errors(answer, "Question", set(evidence.year_map))
+    errors += _badge_errors(answer, set(evidence.year_map), evidence)
+    errors += _question_badge_errors(
+        answer, "Question", set(evidence.year_map) | _index_verified_years(evidence)
+    )
     question_count = len(_section_blocks(answer, "Question"))
     if question_count < 1:
         errors.append("written response has no question blocks")
-    errors += _written_field_errors(answer)
+    errors += _written_field_errors(answer, evidence)
     if len(BADGE_LIKE_PATTERN.findall(answer)) < question_count:
         errors.append("one or more written questions lacks a canonical badge")
     errors += _ungrounded_block_errors(
         answer, "Question", evidence, question_count
     )
     errors += _block_year_errors(
-        answer, "Question", evidence.year_map, evidence.evidence_catalog
+        answer, "Question", evidence.year_map, evidence.evidence_catalog, evidence
     )
     errors += _question_provenance_errors(
         answer,

@@ -370,6 +370,14 @@ class QuestionEvidence:
     exam_style_profile: dict[str, Any] = field(default_factory=dict)
     evidence_catalog: list[dict[str, Any]] = field(default_factory=list)
     recording_sources: tuple[str, ...] = ()
+    # The module's exam index, when one has been built. It records provenance
+    # per *question* -- which paper, which section, which year -- where
+    # year_map can only say which years a *file* contains. For a compiled bank
+    # holding six years of papers those are not the same statement, and the
+    # index is the one that is true. When it knows a question, it settles that
+    # question's years and the block does not have to repeat the filename to a
+    # student who is only trying to revise.
+    exam_index: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
