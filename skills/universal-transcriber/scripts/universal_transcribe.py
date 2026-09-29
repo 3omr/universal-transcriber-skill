@@ -2702,8 +2702,23 @@ def finalize_student_document(
     verified_years: set[int],
     exam_style_profile: dict[str, Any] | None = None,
     evidence_catalog: list[dict[str, Any]] | None = None,
+    exam_index: dict[str, Any] | None = None,
 ) -> str:
-    """Require Agent editorial review before producing the student document."""
+    """Require Agent editorial review before producing the student document.
+
+    ``exam_index`` is the module's Questions/exam-index.json. The evidence
+    catalog only knows the papers uploaded to NotebookLM; the index read every
+    paper on disk, question by question, and is what --verify-provenance and
+    the drafting rules already treat as settling a badge. Without it here, a
+    module whose papers stay local failed every indexed Past Exams badge at
+    the last step.
+    """
+    exam_index = exam_index or {}
+    verified_years = set(verified_years) | {
+        year
+        for question in exam_index.get("questions", {}).values()
+        for year in question.get("years", ())
+    }
     reviewed = draft
     for heading_prefix in ("MCQ", "Question", "Clinical Case"):
         reviewed = deduplicate_question_section(
@@ -2718,6 +2733,7 @@ def finalize_student_document(
             catalog_year_map,
             catalog_names,
             evidence_catalog=evidence_catalog,
+            exam_index=exam_index,
         )
         editorial_errors += _question_provenance_errors(
             reviewed, "MCQ", provenance_evidence
@@ -2732,6 +2748,19 @@ def finalize_student_document(
     finalized = _student_document_from_draft(reviewed)
     validate_final_document(finalized, verified_years)
     return finalized
+
+
+def load_module_exam_index(sources_root: str) -> dict[str, Any]:
+    """The module's exam index, or {} when none has been built."""
+    from exam_index import ExamIndexError, load_index
+
+    try:
+        return load_index(Path(sources_root) / "Questions")
+    except ExamIndexError:
+        return {}
+    except (OSError, ValueError) as error:
+        print(f"[!] Exam index could not be read; finalizing without it: {error}")
+        return {}
 
 
 def _draft_output_path(target: OutputTarget) -> str:
@@ -4096,6 +4125,7 @@ def _save_transcript(request: TranscriptSaveRequest) -> None:
         request.verified_years,
         request.exam_style_profile,
         request.evidence_catalog,
+        request.exam_index,
     )
     index_path = commit_managed_transcript(
         request.identity, request.target, document
@@ -4141,6 +4171,7 @@ def _run_pipeline(config: dict[str, Any], request: RunRequest) -> int:
                 context.verified_years,
                 request.exam_style_profile,
                 context.evidence_catalog,
+                load_module_exam_index(request.sources_root),
             )
         )
         # A successful non-draft run supersedes any stale review draft for the
@@ -4164,6 +4195,7 @@ def _finalize_pipeline(config: dict[str, Any], request: RunRequest) -> int:
         set(report.year_map),
         request.exam_style_profile,
         report.evidence_catalog,
+        load_module_exam_index(request.sources_root),
     )
     identity = TranscriptIdentity(
         request.subject,
