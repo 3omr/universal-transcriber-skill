@@ -1051,14 +1051,25 @@ def _clean_option_text(text: str) -> str:
     return cleaned.strip()
 
 
+# An option label: "a.", "**b.**", "- c)", up to h -- papers print five
+# options often enough (the endocrinology papers answer "e" throughout), and
+# capping at d folded option e into option d's text, where it passed the shape
+# check and then failed the answer that pointed at it. "e.g." and "i.e." are
+# not labels.
+OPTION_LABEL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?<![A-Za-z]\.)(?:[-*]\s*)?(?:\*\*)?([a-hA-H])(?:\*\*)?"
+    r"\s*[\.)](?![A-Za-z]\.)\s*(?:\*\*)?"
+)
+
+
 def _option_entries(options: str) -> dict[str, str]:
     cleaned_options = re.sub(r"(?m)^[ \t]*>[ \t]?", "", options)
-    markers = list(
-        re.finditer(
-            r"(?<![A-Za-z0-9])(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*(?:\*\*)?",
-            cleaned_options,
-        )
-    )
+    # Labels come in order. A letter out of sequence -- "Vitamin D." inside
+    # option b, "Hepatitis E." inside option c -- is option text, not a label.
+    markers = []
+    for marker in OPTION_LABEL_PATTERN.finditer(cleaned_options):
+        if marker.group(1).casefold() == chr(ord("a") + len(markers)):
+            markers.append(marker)
     return {
         marker.group(1).casefold(): _clean_option_text(
             cleaned_options[marker.end() : next_start]
@@ -1103,7 +1114,19 @@ def _option_shape_errors(
         return [f"MCQ {block_number} [missing_field]: missing **Options:**"]
     keys = _option_keys(options)
     expected_keys = _expected_option_keys(profile)
-    if keys != list(expected_keys):
+    sourced = any(
+        "Past Exams" in badge or "Question Bank" in badge
+        for badge in BADGE_LIKE_PATTERN.findall(block)
+    )
+    # The profile describes the usual paper, not every question on it. A
+    # sourced question keeps its paper's options verbatim, so a fifth option
+    # is the paper's and stays; fewer than the profile's count still means
+    # options were run together or lost.
+    # _option_entries only keeps labels in sequence, so the keys are always
+    # a, b, c, ... and a sourced block needs only enough of them.
+    if keys != list(expected_keys) and not (
+        sourced and len(keys) >= len(expected_keys)
+    ):
         errors.append(
             f"MCQ {block_number} options must be separate {', '.join(expected_keys)} entries"
         )
@@ -1120,7 +1143,7 @@ def _correct_answer_errors(
     # period, so without it the "**" stays glued to the answer text and every
     # correctly-written block reads as disagreeing with its own option.
     # _option_entries has always consumed it; this is the same marker.
-    match = re.match(r"(?:[-*]\s*)?(?:\*\*)?([a-dA-D])(?:\*\*)?\s*[\.)]\s*(?:\*\*)?", answer)
+    match = OPTION_LABEL_PATTERN.match(answer)
     if not match:
         return [f"MCQ {block_number} Correct Answer must start with an option label"]
     option_entries = _option_entries(options)

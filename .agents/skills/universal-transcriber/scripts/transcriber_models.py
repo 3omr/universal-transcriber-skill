@@ -425,3 +425,4 @@ class TranscriptSaveRequest:
     verified_years: set[int]
     exam_style_profile: dict[str, Any]
     evidence_catalog: list[dict[str, Any]]
+    exam_index: dict[str, Any] = field(default_factory=dict)
