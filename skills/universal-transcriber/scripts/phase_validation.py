@@ -1066,7 +1066,7 @@ def _option_entries(options: str) -> dict[str, str]:
     cleaned_options = re.sub(r"(?m)^[ \t]*>[ \t]?", "", options)
     # Labels come in order. A letter out of sequence -- "Vitamin D." inside
     # option b, "Hepatitis E." inside option c -- is option text, not a label.
-    markers = []
+    markers: list[re.Match[str]] = []
     for marker in OPTION_LABEL_PATTERN.finditer(cleaned_options):
         if marker.group(1).casefold() == chr(ord("a") + len(markers)):
             markers.append(marker)
