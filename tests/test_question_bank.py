@@ -192,6 +192,24 @@ class DuplicateTests(unittest.TestCase):
 
         self.assertFalse(any(question.is_duplicate for question in marked))
 
+    def test_fifth_and_sixth_options_reach_the_bank_and_its_columns(self) -> None:
+        # Papers print five options, the odd one six; capping at d or e dropped
+        # the option the answer pointed at.
+        parsed = parse_transcript(
+            "### MCQ 1\n\n**Question:** Carcinoid syndrome features\n"
+            "**Options:**\n- **a.** Flushing\n- **b.** Diarrhoea\n"
+            "- **c.** Bronchospasm\n- **d.** Tricuspid lesions\n"
+            "- **e.** Raised 5-HIAA\n- **f.** All of the above\n\n"
+            "**Correct Answer:** f. All of the above\n"
+        )
+        question = questions_from_transcript(parsed)[0]
+
+        self.assertEqual(question.options["e"], "Raised 5-HIAA")
+        self.assertEqual(question.correct_option, "f")
+        self.assertIn("option_e", COLUMNS)
+        self.assertIn("option_f", COLUMNS)
+        self.assertIn("f. All of the above", render_exam_markdown((question,))[0])
+
 
 class BankTests(unittest.TestCase):
     def setUp(self) -> None:

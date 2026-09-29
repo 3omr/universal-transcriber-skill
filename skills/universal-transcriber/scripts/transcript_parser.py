@@ -103,7 +103,7 @@ YEAR = re.compile(r"\b(19|20)\d{2}\b")
 BLOCK_NUMBER = re.compile(r"^(?P<kind>.+?)\s+(?P<number>\d+)\s*(?:\*\*|$)")
 # "- **a.** text" / "a) text" / "**b.** text"
 OPTION_LINE = re.compile(
-    r"^\s*(?:[-*]\s*)?(?:\*\*)?\(?(?P<letter>[a-eA-E])[).\].]?(?:\*\*)?[).\s]\s*(?P<text>.+?)\s*$"
+    r"^\s*(?:[-*]\s*)?(?:\*\*)?\(?(?P<letter>[a-fA-F])[).\].]?(?:\*\*)?[).\s]\s*(?P<text>.+?)\s*$"
 )
 LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d+[.\-)])\s*")
 BLOCKQUOTE_MARKER = re.compile(r"^>\s*")
@@ -310,7 +310,7 @@ def _options(text: str) -> tuple[dict[str, str], str]:
 
 def _correct_option(correct_answer: str, options: dict[str, str]) -> str:
     """Which letter the `Correct Answer` field names, if it names one."""
-    match = re.match(r"\s*\(?([a-eA-E])[).\].]", correct_answer)
+    match = re.match(r"\s*\(?([a-fA-F])[).\].]", correct_answer)
     if match:
         return match.group(1).casefold()
     answer = correct_answer.strip().casefold()

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from question_bank import CASE, MCQ, WRITTEN, BankQuestion, QuestionBank
 
-OPTION_LETTERS = ("a", "b", "c", "d", "e")
+OPTION_LETTERS = ("a", "b", "c", "d", "e", "f")
 
 COLUMNS = (
     "question_id",
@@ -26,10 +26,7 @@ COLUMNS = (
     "lecture",
     "module",
     "stem",
-    "option_a",
-    "option_b",
-    "option_c",
-    "option_d",
+    *(f"option_{letter}" for letter in OPTION_LETTERS),
     "correct_option",
     "answer",
     "years",
@@ -61,10 +58,7 @@ def _row(bank: QuestionBank, question: BankQuestion) -> dict[str, object]:
         "lecture": question.lecture,
         "module": question.module_id,
         "stem": question.stem,
-        "option_a": options.get("a", ""),
-        "option_b": options.get("b", ""),
-        "option_c": options.get("c", ""),
-        "option_d": options.get("d", ""),
+        **{f"option_{letter}": options.get(letter, "") for letter in OPTION_LETTERS},
         "correct_option": question.correct_option,
         "answer": question.answer,
         "years": ", ".join(str(year) for year in question.years),

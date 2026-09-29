@@ -193,6 +193,114 @@ class ExamIndexTests(unittest.TestCase):
         self.assertEqual(sorted(question.options), ["a", "b"])
         self.assertIn("high flow rate", question.options["a"])
 
+    def test_a_starred_fifth_option_is_the_answer_not_a_new_question(self) -> None:
+        """The spreadsheet exports print five options and star the right one.
+
+        Capping labels at d read "*e) Bleeding" as a bulleted question of its
+        own, and the question it belonged to lost its answer.
+        """
+        paper = (
+            "8. Which of the following is NOT a complication of an inguinal hernia?\n"
+            "a) Obstruction\n"
+            "b) Inflammation\n"
+            "c) Strangulation\n"
+            "d) Irreducibility\n"
+            "*e) Bleeding\n"
+            "\n"
+            "9. Which of the following does NOT transilluminate?\n"
+            "a) Epididymal cyst\n"
+            "*b) Hematocele\n"
+        )
+        questions = exam_index.parse_source("End 2026.txt", paper)
+        self.assertEqual(len(questions), 2)
+        first = questions[0]
+        self.assertEqual(sorted(first.options), ["a", "b", "c", "d", "e"])
+        self.assertEqual(first.options["e"], "Bleeding")
+        self.assertEqual(first.options["d"], "Irreducibility")
+        self.assertEqual(first.answer, "e")
+        self.assertEqual(questions[1].answer, "b")
+
+    def test_an_unstarred_fifth_option_is_not_folded_into_d(self) -> None:
+        paper = (
+            "8. Which of the following is NOT a complication of an inguinal hernia?\n"
+            "a) Obstruction\n"
+            "*b) Inflammation\n"
+            "c) Strangulation\n"
+            "d) Irreducibility\n"
+            "e) Bleeding\n"
+        )
+        question = exam_index.parse_source("End 2026.txt", paper)[0]
+        self.assertEqual(question.options["d"], "Irreducibility")
+        self.assertEqual(question.options["e"], "Bleeding")
+        self.assertEqual(question.answer, "b")
+
+    def test_a_sixth_option_follows_the_fifth(self) -> None:
+        paper = (
+            "3. Features of carcinoid syndrome include\n"
+            "a) Flushing\nb) Diarrhoea\nc) Bronchospasm\nd) Tricuspid lesions\n"
+            "e) Raised urinary 5-HIAA\n*f) All of the above\n"
+        )
+        question = exam_index.parse_source("End 2026.txt", paper)[0]
+        self.assertEqual(sorted(question.options), list("abcdef"))
+        self.assertEqual(question.answer, "f")
+
+    def test_bulleted_questions_with_a_starred_fifth_option(self) -> None:
+        """Bullet-opened stems: "*e)" must close the options, "* stem" open one."""
+        paper = (
+            "* The commonest site of a pressure sore is\n"
+            "a) Occiput\nb) Heel\nc) Elbow\nd) Scapula\n*e) Sacrum\n"
+            "* E. coli is the commonest organism in\n"
+            "*a) Urinary tract infection\nb) Cellulitis\n"
+        )
+        questions = exam_index.parse_source("End 2026.txt", paper)
+        self.assertEqual(len(questions), 2)
+        self.assertEqual(questions[0].answer, "e")
+        self.assertEqual(questions[0].options["e"], "Sacrum")
+        self.assertTrue(questions[1].stem.startswith("E. coli"))
+        self.assertEqual(questions[1].answer, "a")
+
+    def test_a_merged_answer_follows_its_option_not_its_letter(self) -> None:
+        """2021 printed the answer as a) of four; 2023 as e) of five.
+
+        Keeping the five options and the 2021 letter pointed the answer at
+        "Herpes simplex".
+        """
+        stem = "18. A 65-year-old farmer presents with an ulcerated lesion of the lip\n"
+        older = stem + (
+            "*a) Squamous cell carcinoma\nb) Herpes simplex\n"
+            "c) Keratoacanthoma\nd) Lichen planus\n"
+        )
+        newer = stem + (
+            "a) Herpes simplex\nb) Melanoma\nc) Lichen planus\n"
+            "d) Keratoacanthoma\n*e) Squamous cell carcinoma\n"
+        )
+        papers = [("End 2021.txt", older), ("Final 2023.txt", newer)]
+        for order in (papers, papers[::-1]):
+            merged = exam_index.merge(
+                [q for name, text in order for q in exam_index.parse_source(name, text)]
+            )
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(len(merged[0].options), 5)
+            self.assertEqual(
+                merged[0].options[merged[0].answer or ""], "Squamous cell carcinoma"
+            )
+
+    def test_e_and_f_are_only_labels_after_the_letter_before_them(self) -> None:
+        """A lost label is only recovered inside a run of four, and "E." or
+        "e.g." only reads as an option where option d already stands."""
+        paper = (
+            "1. The antidote of opium poisoning is\n"
+            "E. coli sepsis may complicate it\n"
+            "a. Naloxone b) Physostigmine\n"
+            "c. Neostigmine\n"
+            "d. Charcoal, e.g. activated\n"
+            ". Gastric lavage\n"
+        )
+        question = exam_index.parse_source("End 2025.txt", paper)[0]
+        self.assertIn("E. coli", question.stem)
+        self.assertEqual(sorted(question.options), ["a", "b", "c", "d"])
+        self.assertIn("e.g. activated", question.options["d"])
+
     def test_missing_index_says_how_to_build_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(exam_index.ExamIndexError) as raised:

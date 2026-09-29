@@ -52,7 +52,7 @@ BULLET_START = re.compile(r"^\s*[*\u2022\u25cf]\s*(.*)$")
 # marker (+, <, #, =, *) is how these papers flag the correct answer; which one
 # varies by who prepared the file, so all of them are accepted.
 OPTION_START = re.compile(
-    r"^\s*(?P<mark>[+<#=*✓✔]?)\s*[(\[]?(?P<key>[a-dA-D])\s*[.)\]]\s*(?P<text>.*)$"
+    r"^\s*(?P<mark>[+<#=*✓✔]?)\s*[(\[]?(?P<key>[a-fA-F])\s*[.)\]]\s*(?P<text>.*)$"
 )
 ANSWER_MARKS = "+<#=*✓✔"
 # The margin of a scanned paper OCRs as punctuation on the front of the line --
@@ -68,7 +68,7 @@ OPTION_TOKEN = re.compile(
     r"(?:^|[\s,;|/.)\]])"
     r"(?P<mark>[+<#=*✓✔])?\s*"
     r"(?P<open>[(\[])?\s*"
-    r"(?P<key>[a-dA-D])\s*"
+    r"(?P<key>[a-fA-F])\s*"
     r"(?P<dot>[.)\]])"
 )
 # The examiner rings the correct answer in pen. The scan renders that ring as
@@ -87,7 +87,16 @@ LOST_LABEL = re.compile(
     r"(?P<text>[A-Za-z(\"].{3,})$"
 )
 LOST_LABEL_MARKS = "+<#=*✓✔@\u00a9\u00ae\u25cb\u25ce"
-OPTION_KEYS = "abcd"
+# Most papers print four options; the spreadsheet exports print five, and the
+# odd one six. Capping at d read "*e) Bleeding" as a new bulleted question and
+# lost the answer with it.
+OPTION_KEYS = "abcdef"
+# Labels every paper uses. A lost label is only ever one of these: the "missing
+# letter from a run" is only certain in a run of four, and past d the next
+# damaged line is far more often the following question than a fifth option.
+COMMON_KEYS = "abcd"
+# "e.g." -- the one way prose starts with a letter and a full stop.
+ABBREVIATION = re.compile(r"^\s*[A-Za-z]\.")
 MODEL_ANSWER = re.compile(r"^\s*model answer\s*:?\s*(.*)$", re.IGNORECASE)
 # Egyptian exam papers leave the answer space as a run of dot leaders. Left on
 # the stem they are invisible to a reader and decisive to a matcher: the same
@@ -209,6 +218,8 @@ def _option_run(line: str, taken: str) -> list[tuple[str, str, bool]]:
         expected = taken and key in OPTION_KEYS[OPTION_KEYS.index(taken[-1]) + 1 :]
         if key <= previous or (not run and not (key == "a" or expected)):
             break
+        if not _label_fits(key, line[match.end() :], previous or taken):
+            break
         end = (
             matches[position + 1].start()
             if position + 1 < len(matches)
@@ -221,12 +232,29 @@ def _option_run(line: str, taken: str) -> list[tuple[str, str, bool]]:
     return run
 
 
+def _label_fits(key: str, following: str, taken: str) -> bool:
+    """Whether a label past d is really an option.
+
+    a-d are labels wherever the rest of the parser says so. "e" and "f" only
+    count as the next letter of a run already in progress -- otherwise "E.
+    coli is ..." opening a stem, or a bulleted "* E. coli ..." question, would
+    be read as an option that nothing came before.
+    """
+    if key in COMMON_KEYS:
+        return True
+    return (
+        bool(taken)
+        and taken[-1] == chr(ord(key) - 1)
+        and not ABBREVIATION.match(following)
+    )
+
+
 def _next_key(taken: str) -> str | None:
     """The label a ringed option must have carried, when the scan ate it."""
     if not taken:
-        return OPTION_KEYS[0]
-    position = OPTION_KEYS.index(taken[-1]) + 1
-    return OPTION_KEYS[position] if position < len(OPTION_KEYS) else None
+        return COMMON_KEYS[0]
+    position = COMMON_KEYS.find(taken[-1]) + 1
+    return COMMON_KEYS[position] if 0 < position < len(COMMON_KEYS) else None
 
 
 def _section_year(
@@ -251,6 +279,12 @@ def parse_source(source_name: str, text: str) -> list[IndexedQuestion]:
             start = QUESTION_START.match(line)
             bullet = BULLET_START.match(line)
             option = OPTION_START.match(line)
+            if option and not _label_fits(
+                option.group("key").casefold(),
+                option.group("text"),
+                "".join(sorted(current.options)) if current else "",
+            ):
+                option = None
             # A numbered line that is also option-shaped is an option; papers
             # number questions, not answers.
             if (start or bullet) and not option:
@@ -291,7 +325,7 @@ def parse_source(source_name: str, text: str) -> list[IndexedQuestion]:
                 lost.group("mark") or lost.group("letters") or not line.lstrip()[:1].isalnum()
             ):
                 lost = None
-            if lost and current.options and len(current.options) < len(OPTION_KEYS):
+            if lost and current.options and len(current.options) < len(COMMON_KEYS):
                 key = _next_key("".join(sorted(current.options)))
                 if key:
                     current.options[key] = lost.group("text").strip()
@@ -354,6 +388,25 @@ def _merge_key(question: IndexedQuestion) -> str:
     return " ".join(normalize(question.stem)[:12])
 
 
+def _relabel(
+    answer: str | None, source: dict[str, str], options: dict[str, str]
+) -> str | None:
+    """The same answer, lettered for another copy of the question.
+
+    Papers reorder options between years: one prints "*a) Squamous cell
+    carcinoma" among four, the next "*e) Squamous cell carcinoma" among five.
+    An answer letter taken from one copy and set on the other's options points
+    at a different option. Where the answer's text sits under another letter,
+    that letter is the answer; otherwise the letter stands as it was.
+    """
+    text = " ".join(normalize(source.get(answer or "", "")))
+    if text:
+        for key, value in options.items():
+            if " ".join(normalize(value)) == text:
+                return key
+    return answer
+
+
 def merge(questions: list[IndexedQuestion]) -> list[IndexedQuestion]:
     """One entry per question, carrying every paper that asked it."""
     merged: dict[str, IndexedQuestion] = {}
@@ -368,9 +421,12 @@ def merge(questions: list[IndexedQuestion]) -> list[IndexedQuestion]:
         kept.occurrences.extend(question.occurrences)
         # Prefer the copy that survived the scan best.
         if not kept.answer and question.answer:
-            kept.answer = question.answer
+            kept.answer = _relabel(question.answer, question.options, kept.options)
         if len(question.options) > len(kept.options):
+            answer = question.answer or kept.answer
+            source = question.options if question.answer else kept.options
             kept.options = question.options
+            kept.answer = _relabel(answer, source, kept.options)
         if len(question.model_answer) > len(kept.model_answer):
             kept.model_answer = question.model_answer
         if question.legible and not kept.legible:
