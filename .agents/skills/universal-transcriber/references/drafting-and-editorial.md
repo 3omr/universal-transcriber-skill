@@ -239,15 +239,31 @@ it — not in a gallery at the end.
 The doctor's own slide always wins. It is what the students saw, it is what the
 exam was written from, and it needs no attribution.
 
-### 2. Only if the deck has none, source one from the web
+### 2. Then fill every gap from the web — a missing deck is not an excuse
 
-When a passage genuinely cannot be understood without a picture — an anatomical
-relationship, a characteristic radiological sign, a rash or lesion whose
-appearance *is* the diagnosis, an ECG pattern, a dosing or management algorithm —
-and neither the deck nor `Figures/` has one, search the web for a replacement.
+A transcript with no pictures is not finished. When the deck has no images,
+when there is no deck, or when its figures do not cover what the doctor
+described, source the missing pictures from the web. "The slides had none" is
+never a reason to ship a picture-less guide.
 
-- **Only when the text needs it.** A figure that decorates a paragraph the words
-  already carry is noise. Prose that reads fine without a picture gets no picture.
+A passage needs a picture when it describes something the student must
+recognise by sight — an anatomical relationship, a characteristic radiological
+sign, a rash or lesion whose appearance *is* the diagnosis, an ECG pattern, a
+clinical sign, a dosing or management algorithm. Walk the Chronological Guide
+heading by heading and give each such passage a figure, from the deck if it has
+one, otherwise from the web.
+
+**Surgery is the strictest case.** Surgical teaching is visual: swellings,
+ulcers, skin and subcutaneous lesions, hernias, neck and breast masses,
+deformities, incisions, operative steps, instruments, and positioning. In a
+surgery module every clinical entity the doctor names and describes — each type
+of swelling, lesion, ulcer, or sign; each operation or approach — gets its own
+picture. A surgery transcript with fewer than about one figure per such entity,
+and never fewer than six in a full lecture or round, is not ready to finalize.
+
+- **Only real gaps.** A figure that repeats one already placed, or decorates a
+  definition or a list of numbers the words carry fine, is noise. Coverage
+  means every *visual* entity has a picture, not that every paragraph does.
 - **Openly licensed sources only**: Wikimedia Commons, Open-i, NIH/CDC/PHIL,
   Radiopaedia cases marked reusable, or an open-access journal figure (CC BY /
   CC BY-SA / public domain). Do not take images from paid textbooks, lecture
@@ -270,3 +286,11 @@ and neither the deck nor `Figures/` has one, search the web for a replacement.
 - **Never invent, generate, or edit a medical image**, and never relabel one to
   fit the text. If nothing suitable and properly licensed exists, write the
   passage without a figure and note `NEEDS_FIGURE` so a human can decide.
+
+### 3. Check coverage before finalizing
+
+Before `--finalize-draft`, list the visual entities in the Chronological Guide
+and the figure placed for each. Every entity has a figure or a `NEEDS_FIGURE`
+note with the reason nothing licensed was found; a surgery lecture also meets
+the floor above. Report the count (deck figures, web figures, `NEEDS_FIGURE`)
+in the handoff, so a picture-less transcript cannot pass unnoticed.

@@ -195,10 +195,15 @@ python3 skills/universal-transcriber/scripts/run_transcription.py \
   --extract-figures --lecture "<lecture_name>"
 ```
 
-If the deck has no figure for a passage that cannot be understood without one,
-source an openly-licensed image from the web, save it beside the extracted ones,
-and caption it as external with attribution. Rules, licence limits, and the
-caption format: [references/drafting-and-editorial.md](references/drafting-and-editorial.md#figures-carrying-the-pictures-into-the-transcript).
+**Pictures are required, not optional.** If the deck has no images, there is no
+deck, or its figures do not cover what the doctor described, source
+openly-licensed images from the web for every visual entity (lesion, swelling,
+sign, anatomy, radiological finding, operative step), save them beside the
+extracted ones, and caption them as external with attribution. **Surgery is
+strictest:** every swelling, lesion, ulcer, sign, or operation the doctor
+describes gets its own picture, and a full surgery lecture or round never ships
+with fewer than six. Check coverage before finalizing. Rules, licence limits,
+and the caption format: [references/drafting-and-editorial.md](references/drafting-and-editorial.md#figures-carrying-the-pictures-into-the-transcript).
 
 ### 3c. Verify Provenance — a gate, not a courtesy
 

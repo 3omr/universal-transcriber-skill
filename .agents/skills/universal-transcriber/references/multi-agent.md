@@ -79,6 +79,8 @@ Run: python3 skills/universal-transcriber/scripts/run_transcription.py \
 EDITORIAL CONTRACT:
 Keep the Chronological Guide complete in natural Egyptian Arabic + English medical terms.
 Review MCQs, Written Questions, and Clinical Cases against the 5-section transcript standard.
+Extract the deck's figures, then fill every visual gap with licensed web images
+(surgery: one per swelling/lesion/sign/operation, at least six per lecture).
 
 RETURN HANDOFF SCHEMA:
 LECTURE WORKER HANDOFF
@@ -89,6 +91,7 @@ MANIFEST: <absolute path>
 RUN_ID: <run id or none>
 DRAFT: <absolute path or none>
 VERIFIED: <commands and concrete evidence>
+FIGURES: <deck N, web N, NEEDS_FIGURE N>
 LIMITATIONS: <source/OCR limitations or none>
 RECOVERY: <specific next action or none>
 ```
@@ -98,7 +101,9 @@ RECOVERY: <specific next action or none>
 ## 4. Fan-In and Acceptance Protocol
 
 1. **Verify Evidence**: Check that returned `.draft.md` is present and non-empty.
-2. **Review Output**: Perform primary editorial review on the draft.
+2. **Review Output**: Perform primary editorial review on the draft, including
+   figure coverage: a draft with visual entities and no pictures goes back to
+   the worker.
 3. **Resolve Corrections**: If corrections are required, send follow-up tasks to the same worker.
 4. **Finalize**:
    ```bash
