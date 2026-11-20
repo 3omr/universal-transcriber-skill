@@ -28,10 +28,11 @@ Transcripts are written sequentially in five distinct sections:
 
 ### Section 1: 📖 Chronological Guide
 
-- **Chronological Completeness**: Never summarize, compress, or omit parts of the doctor's lecture. Preserve the exact pedagogical progression, examples, clinical anecdotes, and transitions between recordings.
-- **Language Blend**: Natural, engaging **Egyptian Arabic** for clinical explanations, reasoning, and conceptual bridges, combined with **English medical terminology** (conditions, drugs, anatomy, lab values).
-- **Speaker Emphasis**: Highlight points the lecturer heavily emphasizes using visual callouts (e.g. `> [!IMPORTANT] الدكتور ركز جداً على ...`).
-- **Unspoken Additions**: Explicitly allowed book/slide additions that clarify a recording topic must use the standard note callout:
+- **Chronological Completeness & Lecture-Hall Spirit**: Never summarize, compress, or omit parts of the doctor's lecture. Preserve the exact pedagogical progression, student-teacher dialogues, corrections of wrong student answers, clinical anecdotes, jokes, and transitions between recordings in their real spoken order.
+- **Natural Egyptian Arabic (No Stiff MSA Medical Translations)**: Write explanations in natural, lively **spoken Egyptian Arabic** paired directly with **English medical terminology** (`Jaundice`, `Hemostasis`, `Hyperbilirubinemia`, drugs, anatomy, lab values). **Never** translate medical terms into stiff formal MSA ("اليرقان الوليدي"، "الإرقاء الأولي"، "فرط بيليروبين الدم") and avoid dry third-person textbook narration ("افتتح الدكتور المحاضرة بالتأكيد على...").
+- **Scannable Formatting**: Keep the conversational lecture flow without turning the guide into dense walls of text — break enumerations, cutoffs, numbers, and comparisons into clean bullet points under clear `###`/`####` headings.
+- **Purposeful Callouts Only**: Use `> [!IMPORTANT]` **only** when the doctor explicitly stressed or repeated a point (never as decoration on every paragraph). Use `> [!WARNING]` for spoken warnings/pitfalls and `> [!CAUTION]` strictly for absolute contraindications, red flags, or lethal errors.
+- **Strict Doctor vs. Book/Slide Separation**: Keep the doctor's spoken prose 100% faithful to the recording — **never silently weave unspoken textbook mechanisms, extra cutoffs, or slide details into the doctor's paragraphs**. Any essential unspoken clarification from a slide or book must be isolated inside the standard note callout:
   ```markdown
   > [!NOTE]
   > **إضافة من الكتاب/السلايد — لم يشرحها الدكتور في التسجيل**
@@ -42,22 +43,33 @@ Transcripts are written sequentially in five distinct sections:
 
 ### Section 2: 🌟 IMP Points
 
+**Strictly restricted to the doctor's spoken lecture (recording only)** — mirror
+the Radiology transcripts style. Never pull facts, traps, guideline updates, or
+summary tables from textbooks, slides, handouts, past-exam papers, or question
+banks into this section. Write in natural **Egyptian Arabic** mixed with precise
+**English medical terms**, formatted as clean markdown bullet lists (`- `),
+**without summarizing** — capture every emphasized point, exam hint, warning,
+class question, and non-medical guideline the doctor actually voiced, quoting
+memorable doctor phrasing verbatim whenever supported by the recording.
+
 Must contain **exactly these five `####` headings**, in this order and spelled
 this way — `phase_validation.IMP_HEADINGS` and the phase prompt both enforce it:
 
 ```markdown
-#### 1. 📌 Doctor's Spoken Pearls
-#### 2. ⚠️ Diagnostic Traps
-#### 3. 🛑 Lethal Mistakes
-#### 4. ❓ Interactive Doctor Questions
-#### 5. 📋 Exam Rules
+#### 1. 📌 النقاط الطبية الحرجة اللي ركز عليها الدكتور (Critical Medical Points)
+#### 2. 🎯 نقاط الامتحان اللي أشار ليها الدكتور (Exam Points)
+#### 3. ⚠️ تحذيرات الدكتور (Warnings)
+#### 4. ❓ أسئلة الدكتور للطلبة أثناء الشرح (Questions Asked to the Class)
+#### 5. 📋 توجيهات وتعليمات غير طبية (Non-Medical Guidelines)
 ```
 
-1. **Doctor's Spoken Pearls**: what the lecturer actually said, quoted where it is memorable.
-2. **Diagnostic Traps**: must contain at least one `> [!WARNING]` callout.
-3. **Lethal Mistakes**: must contain at least one `> [!CAUTION]` callout.
-4. **Interactive Doctor Questions**: the questions the lecturer threw at the room.
-5. **Exam Rules**: what the lecturer said about the exam itself, plus any summary tables.
+1. **النقاط الطبية الحرجة اللي ركز عليها الدكتور (Critical Medical Points)**: every critical medical concept, comparison, number, or clinical pearl the lecturer explicitly focused on and emphasized in the recording — no book/slide additions.
+2. **نقاط الامتحان اللي أشار ليها الدكتور (Exam Points)**: every topic, question, image, sign, or trick the lecturer explicitly indicated would appear in the exam (written, MCQ, practical/OSCE, or oral), preserving their exact hint or quote.
+3. **تحذيرات الدكتور (Warnings)**: every medical, clinical, legal, safety, or practical warning the lecturer actually voiced (contraindications, red flags, mistakes to avoid). List directly as clear bullets — never invent warnings the doctor did not say, and never force callout boilerplate.
+4. **أسئلة الدكتور للطلبة أثناء الشرح (Questions Asked to the Class)**: every interactive question the lecturer threw at the room, verbatim/near-verbatim, along with the answer actually given (if any).
+5. **توجيهات وتعليمات غير طبية (Non-Medical Guidelines)**: non-medical instructions actually spoken by the lecturer (exam format/structure, grading, attendance, booklets/slides/sources to study from, revision sessions, schedule notices, or classroom reminders). Never add textbook or slide summary tables here.
+
+- **Empty categories**: If the doctor did not touch on one of the five categories in this recording, keep its `####` heading and add one brief italicized Arabic note — e.g. `*(ملحوظة: الدكتور لم يتطرق في هذه المحاضرة لأي قواعد غير طبية زي الحضور أو الغياب أو نظام الدرجات أو المذكرات)*`. Never pad or fabricate items from external sources.
 
 ---
 
@@ -239,15 +251,31 @@ it — not in a gallery at the end.
 The doctor's own slide always wins. It is what the students saw, it is what the
 exam was written from, and it needs no attribution.
 
-### 2. Only if the deck has none, source one from the web
+### 2. Then fill every gap from the web — a missing deck is not an excuse
 
-When a passage genuinely cannot be understood without a picture — an anatomical
-relationship, a characteristic radiological sign, a rash or lesion whose
-appearance *is* the diagnosis, an ECG pattern, a dosing or management algorithm —
-and neither the deck nor `Figures/` has one, search the web for a replacement.
+A transcript with no pictures is not finished. When the deck has no images,
+when there is no deck, or when its figures do not cover what the doctor
+described, source the missing pictures from the web. "The slides had none" is
+never a reason to ship a picture-less guide.
 
-- **Only when the text needs it.** A figure that decorates a paragraph the words
-  already carry is noise. Prose that reads fine without a picture gets no picture.
+A passage needs a picture when it describes something the student must
+recognise by sight — an anatomical relationship, a characteristic radiological
+sign, a rash or lesion whose appearance *is* the diagnosis, an ECG pattern, a
+clinical sign, a dosing or management algorithm. Walk the Chronological Guide
+heading by heading and give each such passage a figure, from the deck if it has
+one, otherwise from the web.
+
+**Surgery is the strictest case.** Surgical teaching is visual: swellings,
+ulcers, skin and subcutaneous lesions, hernias, neck and breast masses,
+deformities, incisions, operative steps, instruments, and positioning. In a
+surgery module every clinical entity the doctor names and describes — each type
+of swelling, lesion, ulcer, or sign; each operation or approach — gets its own
+picture. A surgery transcript with fewer than about one figure per such entity,
+and never fewer than six in a full lecture or round, is not ready to finalize.
+
+- **Only real gaps.** A figure that repeats one already placed, or decorates a
+  definition or a list of numbers the words carry fine, is noise. Coverage
+  means every *visual* entity has a picture, not that every paragraph does.
 - **Openly licensed sources only**: Wikimedia Commons, Open-i, NIH/CDC/PHIL,
   Radiopaedia cases marked reusable, or an open-access journal figure (CC BY /
   CC BY-SA / public domain). Do not take images from paid textbooks, lecture
@@ -270,3 +298,11 @@ and neither the deck nor `Figures/` has one, search the web for a replacement.
 - **Never invent, generate, or edit a medical image**, and never relabel one to
   fit the text. If nothing suitable and properly licensed exists, write the
   passage without a figure and note `NEEDS_FIGURE` so a human can decide.
+
+### 3. Check coverage before finalizing
+
+Before `--finalize-draft`, list the visual entities in the Chronological Guide
+and the figure placed for each. Every entity has a figure or a `NEEDS_FIGURE`
+note with the reason nothing licensed was found; a surgery lecture also meets
+the floor above. Report the count (deck figures, web figures, `NEEDS_FIGURE`)
+in the handoff, so a picture-less transcript cannot pass unnoticed.

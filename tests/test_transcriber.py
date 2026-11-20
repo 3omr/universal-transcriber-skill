@@ -3178,6 +3178,191 @@ class NotebookLmPhraseCleanupTests(unittest.TestCase):
         engine.clean_notebooklm_phrases("")
 
 
+class DoctorOnlyImpPointsTests(unittest.TestCase):
+    """Section 2 (IMP Points) mirrors the Radiology style: recording-only bullets."""
+
+    RADIOLOGY_STYLE_IMP = "\n\n".join(
+        [
+            f"{engine.IMP_HEADINGS[0]}\n- السونار هو الفحص الأول للحوامل والأطفال لأنه آمن.",
+            f"{engine.IMP_HEADINGS[1]}\n- الدكتور أكد إن صورة Multiple air-fluid levels جاية في الامتحان.",
+            f"{engine.IMP_HEADINGS[2]}\n- ممنوع حقن صبغة وريدية قبل تحليل وظائف الكلى (Serum Creatinine).",
+            f"{engine.IMP_HEADINGS[3]}\n- \"إيه الباب اللي بتخرج منه الصبغة؟\"",
+            f"{engine.IMP_HEADINGS[4]}\n*(ملحوظة: الدكتور لم يتطرق في هذه المحاضرة لأي قواعد غير طبية زي الحضور أو الدرجات)*",
+        ]
+    )
+
+    def test_validate_imp_accepts_radiology_style_bullets_without_forced_callouts(self) -> None:
+        result = engine.QueryResult(
+            answer=self.RADIOLOGY_STYLE_IMP,
+            source_names=("Abdominal Imaging.m4a",),
+        )
+
+        errors = engine.validate_imp(result, ("Abdominal Imaging.m4a",))
+
+        self.assertEqual(errors, [])
+
+    def test_validate_imp_rejects_non_recording_citations(self) -> None:
+        result = engine.QueryResult(
+            answer=self.RADIOLOGY_STYLE_IMP,
+            source_names=("Radiology book.pdf",),
+        )
+
+        errors = engine.validate_imp(result, ("Abdominal Imaging.m4a",))
+
+        self.assertTrue(any("recording authority" in error for error in errors), errors)
+
+    def test_validate_imp_rejects_missing_or_wrong_headings(self) -> None:
+        result = engine.QueryResult(answer="#### 1. 📌 Doctor's Spoken Pearls\n- Old heading")
+
+        errors = engine.validate_imp(result)
+
+        self.assertTrue(any("five required headings" in error for error in errors), errors)
+
+    def test_emphasis_point_count_ignores_empty_category_notes(self) -> None:
+        self.assertEqual(engine.emphasis_point_count(self.RADIOLOGY_STYLE_IMP), 4)
+
+    def test_imp_scope_and_manifest_are_strictly_recording_only(self) -> None:
+        recording = engine.LocalSource(
+            path="/tmp/Lecture/Abdominal.m4a",
+            relative_path="Lecture/Abdominal.m4a",
+            name="Abdominal.m4a",
+            normalized_name=engine.normalize_source_key("Abdominal.m4a"),
+            normalized_stem=engine.normalize_source_stem("Abdominal.m4a"),
+            extension=".m4a",
+            size=10,
+            role="recording",
+        )
+        slides = engine.LocalSource(
+            path="/tmp/Lecture/Abdominal.pdf",
+            relative_path="Lecture/Abdominal.pdf",
+            name="Abdominal.pdf",
+            normalized_name=engine.normalize_source_key("Abdominal.pdf"),
+            normalized_stem=engine.normalize_source_stem("Abdominal.pdf"),
+            extension=".pdf",
+            size=10,
+            role="slides",
+        )
+        textbook = engine.LocalSource(
+            path="/tmp/Lecture/Radiology book.pdf",
+            relative_path="Lecture/Radiology book.pdf",
+            name="Radiology book.pdf",
+            normalized_name=engine.normalize_source_key("Radiology book.pdf"),
+            normalized_stem=engine.normalize_source_stem("Radiology book.pdf"),
+            extension=".pdf",
+            size=10,
+            role="textbook",
+        )
+        exam = engine.LocalSource(
+            path="/tmp/Questions/Final 2024.pdf",
+            relative_path="Questions/Final 2024.pdf",
+            name="Final 2024.pdf",
+            normalized_name=engine.normalize_source_key("Final 2024.pdf"),
+            normalized_stem=engine.normalize_source_stem("Final 2024.pdf"),
+            extension=".pdf",
+            size=10,
+            role="past_exam",
+            years=(2024,),
+        )
+        remote_sources = [
+            engine.RemoteSource(
+                source_id="rec-id",
+                title="Abdominal.m4a",
+                normalized_name=engine.normalize_source_key("Abdominal.m4a"),
+                normalized_stem=engine.normalize_source_stem("Abdominal.m4a"),
+                source_type="audio",
+                notebook_uuid="nb-1",
+                status="ready",
+            ),
+            engine.RemoteSource(
+                source_id="slide-id",
+                title="Abdominal.pdf",
+                normalized_name=engine.normalize_source_key("Abdominal.pdf"),
+                normalized_stem=engine.normalize_source_stem("Abdominal.pdf"),
+                source_type="pdf",
+                notebook_uuid="nb-1",
+                status="ready",
+            ),
+            engine.RemoteSource(
+                source_id="book-id",
+                title="Radiology book.pdf",
+                normalized_name=engine.normalize_source_key("Radiology book.pdf"),
+                normalized_stem=engine.normalize_source_stem("Radiology book.pdf"),
+                source_type="pdf",
+                notebook_uuid="nb-1",
+                status="ready",
+            ),
+            engine.RemoteSource(
+                source_id="exam-id",
+                title="Final 2024.pdf",
+                normalized_name=engine.normalize_source_key("Final 2024.pdf"),
+                normalized_stem=engine.normalize_source_stem("Final 2024.pdf"),
+                source_type="pdf",
+                notebook_uuid="nb-1",
+                status="ready",
+            ),
+        ]
+        target = engine.NotebookTarget("lib-1", "nb-1", "https://example.invalid", "Radiology")
+        report = engine.Phase0Report(
+            notebook=target,
+            notebooks=(target,),
+            recording_source="Abdominal.m4a",
+            recording_sources=("Abdominal.m4a",),
+            slide_source="Abdominal.pdf",
+            local_sources=[recording, slides, textbook, exam],
+            remote_sources=remote_sources,
+            year_map={2024: ["Final 2024.pdf"]},
+            question_banks=[],
+            question_bank_links={},
+            reference_guidance=[
+                {
+                    "path": "Lecture/Radiology book.pdf",
+                    "source_type": "textbook",
+                    "allow_unspoken_additions": True,
+                }
+            ],
+            evidence_catalog=[],
+            blocking_errors=[],
+        )
+        identity = engine.TranscriptIdentity("Radiology", "Abdominal Imaging", "🩻", "Abdominal.m4a")
+
+        context = engine._pipeline_context({}, report, identity)
+
+        self.assertEqual(context.imp_scope.source_ids, ("rec-id",))
+        self.assertIn("Abdominal.m4a", context.imp_source_manifest)
+        self.assertNotIn("Radiology book.pdf", context.imp_source_manifest)
+        self.assertNotIn("Abdominal.pdf", context.imp_source_manifest)
+        self.assertNotIn("Final 2024.pdf", context.imp_source_manifest)
+        self.assertNotIn("REFERENCE ENRICHMENT POLICY", context.imp_source_manifest)
+
+        captured: list[engine.PhaseQuery] = []
+
+        def fake_run_nlm_query(phase_query: engine.PhaseQuery) -> engine.QueryResult:
+            captured.append(phase_query)
+            return engine.QueryResult(
+                answer=self.RADIOLOGY_STYLE_IMP,
+                source_names=("Abdominal.m4a",),
+            )
+
+        with unittest.mock.patch.object(engine, "run_nlm_query", side_effect=fake_run_nlm_query):
+            engine._query_imp(context)
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].source_ids, ("rec-id",))
+        self.assertIn("STRICT DOCTOR-ONLY CONSTRAINT", captured[0].query_text)
+        self.assertNotIn("Radiology book.pdf", captured[0].query_text)
+        for heading in engine.IMP_HEADINGS:
+            self.assertIn(heading, captured[0].query_text)
+
+    def test_guide_prompt_enforces_natural_egyptian_arabic_and_strict_separation(self) -> None:
+        prompt = engine.build_guide_prompt("Pediatrics", "Neonatal Jaundice", "ctx")
+
+        self.assertIn("natural spoken Egyptian Arabic", prompt)
+        self.assertIn("Never translate medical terms into stiff formal MSA", prompt)
+        self.assertIn("STRICT DOCTOR VS. BOOK/SLIDE SEPARATION", prompt)
+        self.assertIn("إضافة من الكتاب/السلايد — لم يشرحها الدكتور في التسجيل", prompt)
+        self.assertIn("never decorative callouts", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
 

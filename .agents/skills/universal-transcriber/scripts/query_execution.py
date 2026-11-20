@@ -125,7 +125,10 @@ def _merge_imp_answers(answers: list[str]) -> str:
     return "\n\n".join(
         heading
         + "\n"
-        + ("\n\n".join(_unique_strings(sections[heading])) or "None explicitly stated")
+        + (
+            "\n\n".join(_unique_strings(sections[heading]))
+            or "*(ملحوظة: الدكتور لم يتطرق لهذا الجزء في التسجيل)*"
+        )
         for heading in IMP_HEADINGS
     )
 

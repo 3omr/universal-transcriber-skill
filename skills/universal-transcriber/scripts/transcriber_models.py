@@ -354,6 +354,8 @@ class PipelineContext:
     assessment_source_scope: QueryScope = field(
         default_factory=lambda: QueryScope((), ())
     )
+    imp_scope: QueryScope = field(default_factory=lambda: QueryScope((), ()))
+    imp_source_manifest: str = ""
 
 
 @dataclass(frozen=True)

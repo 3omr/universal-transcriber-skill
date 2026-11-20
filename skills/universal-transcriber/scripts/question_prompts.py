@@ -19,11 +19,11 @@ import re
 from typing import Any
 
 IMP_HEADINGS = (
-    "#### 1. \U0001f4cc Doctor's Spoken Pearls",
-    "#### 2. \u26a0\ufe0f Diagnostic Traps",
-    "#### 3. \U0001f6d1 Lethal Mistakes",
-    "#### 4. \u2753 Interactive Doctor Questions",
-    "#### 5. \U0001f4cb Exam Rules",
+    "#### 1. 📌 النقاط الطبية الحرجة اللي ركز عليها الدكتور (Critical Medical Points)",
+    "#### 2. 🎯 نقاط الامتحان اللي أشار ليها الدكتور (Exam Points)",
+    "#### 3. ⚠️ تحذيرات الدكتور (Warnings)",
+    "#### 4. ❓ أسئلة الدكتور للطلبة أثناء الشرح (Questions Asked to the Class)",
+    "#### 5. 📋 توجيهات وتعليمات غير طبية (Non-Medical Guidelines)",
 )
 NO_MCQS = "NO_GROUNDED_MCQS"
 NO_WRITTEN = "NO_GROUNDED_WRITTEN_QUESTIONS"
@@ -108,18 +108,27 @@ def build_guide_prompt(subject: str, title: str, context: str) -> str:
 
 {context}
 The named recording is the sole authority for what the doctor said, the exact
-teaching chronology, emphasis, dialogue, jokes, anecdotes, pauses, and
-administrative remarks. Follow it step by step without summarizing, regrouping
-into textbook order, or inventing transitions. Preserve quoted speech and
-questions verbatim whenever the recording supports it.
+teaching chronology, emphasis, student-teacher dialogue, corrections of wrong
+student answers, jokes, clinical anecdotes, pauses, and administrative remarks.
+Follow it step by step without summarizing, regrouping into textbook order, or
+inventing transitions. Preserve quoted speech and interactive questions verbatim
+whenever the recording supports it.
 
-Write the explanation in Egyptian Arabic mixed with precise English medical
-terms. Use the slide source for titles, table structure, and figures that
-correspond to spoken material. Use textbooks/references for terminology,
-accuracy, and only the Agent-selected contextual details in the enrichment
-policy. Never dump reference material or present it as spoken commentary. If an
-unspoken book or slide detail directly clarifies a taught point, add it
-selectively in this exact form and do not attribute it to the doctor:
+Write the explanation in natural spoken Egyptian Arabic mixed directly with
+precise English medical terms (e.g. Jaundice, Hemostasis, Hyperbilirubinemia).
+Never translate medical terms into stiff formal MSA ("اليرقان الوليدي", "الإرقاء
+الأولي", "فرط بيليروبين الدم") and avoid dry third-person textbook prose. Keep
+the reading experience scannable by breaking enumerations, cutoffs, numbers, and
+comparisons into crisp markdown bullets instead of dense walls of text.
+
+STRICT DOCTOR VS. BOOK/SLIDE SEPARATION: Keep the doctor's spoken paragraphs
+100% pure to the recording. Never silently weave unspoken textbook mechanisms,
+extra numbers, or slide-only details into the doctor's prose. Use the slide
+source for titles, table structure, and figures that correspond to spoken
+material. Use textbooks/references for terminology verification and only the
+Agent-selected contextual details in the enrichment policy. If an unspoken book
+or slide detail directly clarifies a taught point, isolate it in this exact
+callout and never attribute it to the doctor:
 > [!NOTE]
 > **إضافة من الكتاب/السلايد — لم يشرحها الدكتور في التسجيل**
 > concise contextual addition
@@ -128,8 +137,10 @@ add a clearly attributed NOTE. Surface conflicts for editorial review instead of
 silently choosing one source.
 
 Return section body only. Use ### and #### headings, never # or ##. Use only
-> [!NOTE], > [!IMPORTANT], > [!WARNING], and > [!CAUTION]. Reserve CAUTION for
-absolute contraindications, red flags, or lethal errors. Do not produce a summary."""
+> [!NOTE], > [!IMPORTANT], > [!WARNING], and > [!CAUTION]. Reserve > [!IMPORTANT]
+strictly for points the doctor explicitly stressed (never decorative callouts on
+every paragraph) and > [!CAUTION] for absolute contraindications, red flags, or
+lethal errors. Do not produce a summary."""
 
 
 def build_imp_prompt(title: str, context: str) -> str:
@@ -137,18 +148,43 @@ def build_imp_prompt(title: str, context: str) -> str:
     return f"""Create only the body of the 🌟 IMP Points section for '{title}'.
 
 {context}
-Use only points explicitly emphasized or spoken in the recording. Do not add
-generic textbook high-yield facts. Return exactly these five #### headings in
-exactly this order and no other headings:
+Based ONLY on the doctor's spoken lecture recording, extract all critical points
+the doctor focused on, points/images/questions they explicitly indicated would
+appear on the exam, warnings they voiced, questions they asked the class, and
+non-medical guidelines (exam structure, grading, attendance, booklets/slides,
+revision sessions, or classroom reminders).
+
+STRICT DOCTOR-ONLY CONSTRAINT: Restrict this section 100% to what the doctor
+actually said in the recording. Never add textbook high-yield facts, slide-only
+details, external guideline updates, past-exam content not mentioned by the
+doctor, or summary tables. Avoid summarizing: list every emphasized point,
+warning, question, and exam hint clearly in natural Egyptian Arabic mixed with
+precise English medical terms, using clean markdown bullet lists (`- `), and
+preserve memorable doctor quotes verbatim when supported by the recording.
+
+Return exactly these five #### headings in exactly this order and no other
+headings:
 {headings}
 
-Under Diagnostic Traps, put every item in a > [!WARNING] block. Under Lethal
-Mistakes, put every item in a > [!CAUTION] block. If either category has no
-explicit item, keep its heading and place an explicit 'None explicitly stated in
-the recording' message inside the required callout. Preserve every interactive
-doctor question and the answer actually given. Exam Rules includes grading,
-booklet, attendance, exam format, and other non-medical instructions. Write in
-Egyptian Arabic mixed with English medical terms. Return the section body only."""
+1. Critical Medical Points: every key medical concept, comparison, number, or
+   clinical pearl the doctor explicitly focused on during the lecture.
+2. Exam Points: every question, image, sign, topic, or trick the doctor
+   explicitly indicated would be on the exam (written, MCQ, practical/OSCE, or
+   oral), keeping the doctor's exact hint/wording where possible.
+3. Warnings: every medical, clinical, legal, safety, or practical warning
+   voiced by the doctor (contraindications, red flags, mistakes to avoid). List
+   them directly as clear bullets; do not invent warnings the doctor never said.
+4. Questions Asked to the Class: every interactive question the doctor asked
+   students in the lecture hall, preserved verbatim/near-verbatim along with
+   the answer actually given (if any).
+5. Non-Medical Guidelines: attendance, grading, exam format, study sources,
+   booklets/slides, revision schedules, or classroom instructions spoken by the
+   doctor. Never add summary tables here.
+
+If the doctor did not mention anything for a category in this recording, keep
+its heading and write one brief italicized Arabic note such as
+`*(ملحوظة: الدكتور لم يتطرق في هذه المحاضرة لـ ...)*` — never pad or fabricate
+items. Return the section body only; never use # or ## headings."""
 
 
 def build_mcq_prompt(
