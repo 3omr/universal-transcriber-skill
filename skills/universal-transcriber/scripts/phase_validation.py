@@ -220,16 +220,21 @@ def validate_guide(
     return errors
 
 
-def validate_imp(query_result: QueryResult) -> list[str]:
+def validate_imp(
+    query_result: QueryResult,
+    recording_sources: tuple[str, ...] = (),
+) -> list[str]:
     errors = _body_heading_errors(query_result.answer)
     errors += _callout_errors(query_result.answer)
     headings = re.findall(r"^#{3,6} .+$", query_result.answer, flags=re.MULTILINE)
     if tuple(headings) != IMP_HEADINGS:
         errors.append("IMP section does not contain exactly the five required headings")
-    if "> [!WARNING]" not in query_result.answer:
-        errors.append("Diagnostic Traps lacks a WARNING callout")
-    if "> [!CAUTION]" not in query_result.answer:
-        errors.append("Lethal Mistakes lacks a CAUTION callout")
+    if (
+        recording_sources
+        and query_result.source_names
+        and not _citations_include(query_result, list(recording_sources))
+    ):
+        errors.append("IMP citations do not include the recording authority")
     return errors
 
 

@@ -235,7 +235,8 @@ validator. A badge is a promise to a student revising by it.
 
 Open and review the generated `.draft.md` before finalization:
 
-- **Chronological Guide**: Verify complete preservation of the doctor's spoken explanations, sequence, examples, and Egyptian Arabic dialogue. Never summarize or compress this section.
+- **Chronological Guide**: Verify complete preservation of the doctor's spoken explanations, sequence, student dialogues, corrections, and examples in natural Egyptian Arabic with direct English medical terms (never stiff MSA medical translations). Ensure unspoken book/slide clarifications are strictly isolated inside `> [!NOTE] إضافة من الكتاب/السلايد — لم يشرحها الدكتور في التسجيل` (never silently blended into the doctor's text), enumerations/numbers use scannable bullets, and `> [!IMPORTANT]` callouts reflect real doctor emphasis rather than decoration. Never summarize or compress this section.
+- **IMP Points (Doctor-Only)**: Verify Section 2 contains only what the doctor actually emphasized, warned about, asked the class, and indicated for the exam across the five required `####` headings in Egyptian Arabic bullets — prune any textbook facts, slide additions, guideline updates, or summary tables not spoken by the doctor.
 - **Lecture Scope & Question Relevance**: Cross-check every extracted question in MCQs, Written, and Cases against the Chronological Guide and lecture slides. Delete any out-of-scope question that belongs to another lecture/chapter and was not taught in this lecture, then re-index the remaining questions sequentially.
 - **OCR Normalization & Duplicate Resolution**: Restore damaged characters or split option labels (`- **a.**`). Merge identical questions across years into single blocks with ascending badges (e.g. `**[Past Exams - 2021, 2022, 2023]**`). Do not rewrite source questions.
 - **Answer Alignment**: Confirm `Correct Answer` matches the option letter and that the clinical explanation aligns.
