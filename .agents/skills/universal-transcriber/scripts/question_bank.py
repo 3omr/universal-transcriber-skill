@@ -165,7 +165,8 @@ def _badge_fields(item: ParsedMCQ | ParsedWritten | ParsedCase) -> dict[str, obj
         "badge_labels": tuple(labels),
         "is_past_exam": PAST_EXAMS in kinds,
         "is_question_bank": QUESTION_BANK in kinds,
-        "is_important": IMPORTANT in kinds,
+        "is_important": IMPORTANT in kinds
+        or any("/ imp" in badge.label.casefold() for badge in item.badges),
     }
 
 
