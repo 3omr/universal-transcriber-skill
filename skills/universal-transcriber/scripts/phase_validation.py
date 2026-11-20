@@ -246,9 +246,9 @@ def _section_blocks(answer: str, heading_prefix: str) -> list[str]:
             return blocks
         if "> [!TIP]" in answer:
             return [b.strip() for b in answer.split("> [!TIP]") if b.strip()]
-        pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |\Z))"
+        pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |^---\s*\n+## |^## |\Z))"
         return re.findall(pattern, answer)
-    pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |\Z))"
+    pattern = rf"(?ms)^(?:[ \t]*>[ \t]*)?### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^(?:[ \t]*>[ \t]*)?### |^---\s*\n+## |^## |\Z))"
     return re.findall(pattern, answer)
 
 
@@ -774,12 +774,10 @@ def _merged_badges(
     badges: list[str] = []
     if past and years:
         year_text = ", ".join(str(year) for year in sorted(years))
-        badges.append(
-            f"**[Past Exams ({year_text}) / IMP]**" if imp else f"**[Past Exams - {year_text}]**"
-        )
+        badges.append(f"**[Past Exams - {year_text}]**")
     if question_bank:
         badges.append("**[Question Bank]**")
-    if imp and not past:
+    if imp:
         badges.append("**[IMP]**")
     return badges
 
@@ -956,7 +954,7 @@ def deduplicate_question_section(
     else:
         matches = list(
             re.finditer(
-                rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=^### |\Z)",
+                rf"(?ms)^### {re.escape(heading_prefix)}\s+\d+.*?(?=(?:^### |^---\s*\n+## |^## |\Z))",
                 answer,
             )
         )

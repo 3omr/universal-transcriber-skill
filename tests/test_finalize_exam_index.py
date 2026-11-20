@@ -161,7 +161,19 @@ class FinalizeAgainstExamIndexTests(unittest.TestCase):
             index([2024]),
         )
 
-        self.assertRegex(document, r"### MCQ 1 \*\*\[Past Exams \(2024\)")
+        self.assertIn("### MCQ 1 **[Past Exams - 2024]**\n", document)
+        self.assertNotIn("### MCQ 1 **[Past Exams - 2024]** **[IMP]**", document)
+
+    def test_dual_past_exam_and_imp_badges_finalize_side_by_side(self) -> None:
+        document = engine.finalize_student_document(
+            draft(mcq("**[Past Exams - 2024]** **[IMP]**")),
+            set(),
+            PROFILE,
+            LECTURE_ONLY_CATALOG,
+            index([2024]),
+        )
+
+        self.assertIn("### MCQ 1 **[Past Exams - 2024]** **[IMP]**\n", document)
 
     def test_without_the_index_the_same_badge_is_rejected(self) -> None:
         with self.assertRaises(engine.ValidationError) as raised:

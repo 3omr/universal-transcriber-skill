@@ -113,14 +113,22 @@ Format every MCQ with clean Markdown field labels and valid badges:
   question the index does not know, where it is the only record of where the
   question came from; a block badged only `**[IMP]**` never carries one, and
   fails with `[source_role_mismatch]` if it does.
-- **Badges**:
+- **Badges** (applies across Sections 3, 4, and 5):
   - `**[Past Exams - 2023]**`
   - `**[Past Exams - 2021, 2022, 2023]**`
   - `**[Question Bank]**`
   - `**[IMP]**`
-  - `**[Past Exams (2022) / IMP]**` — note the **parentheses**: the combined
-    form is `(YYYY)`, not `- YYYY`, and it additionally requires the recording
-    to be cited or named in a `**Source:**` line
+  - **Dual badges (Past Exams / Question Bank + IMP)**: always stack `**[IMP]**`
+    side by side — e.g. `**[Past Exams - 2022, 2023]** **[IMP]**`,
+    `**[Question Bank]** **[IMP]**`, or
+    `**[Past Exams - 2023]** **[Question Bank]** **[IMP]**` — whenever a
+    past-exam or question-bank question tests a point the doctor also explicitly
+    emphasized or flagged for the exam in the recording (Section 2). Never drop
+    `**[IMP]**` just because the question already carries a Past Exams badge,
+    and never attach `**[IMP]**` unless the doctor actually stressed that point.
+    *(The legacy single-badge form `**[Past Exams (2022) / IMP]**` remains
+    accepted for backwards compatibility, but prefer the two separate badges so
+    both `Past Exams` and `IMP` stay cleanly visible and filterable.)*
 
 > [!WARNING]
 > **A year badge is a promise to a student revising by it.** `**[Past Exams -

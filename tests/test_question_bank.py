@@ -349,5 +349,57 @@ class ExportTests(unittest.TestCase):
                 bank_export.write_xlsx(self.bank, self.root / "bank.xlsx")
 
 
+class DualBadgeTests(unittest.TestCase):
+    def test_dual_and_legacy_combined_badges_set_both_past_exam_and_important(self) -> None:
+        text = """# Lecture
+
+## 📖 Chronological Guide
+
+Notes.
+
+## 🌟 IMP Points
+
+Notes.
+
+## ❓ MCQs
+
+### MCQ 1 **[Past Exams - 2024]** **[IMP]**
+
+**Question:** First dual-badged stem?
+**Options:**
+- **a.** One
+- **b.** Two
+- **c.** Three
+- **d.** Four
+**Correct Answer:** a. One
+**Clinical Explanation:** شرح
+
+### MCQ 2 **[Past Exams (2023) / IMP]**
+
+**Question:** Legacy combined-badged stem?
+**Options:**
+- **a.** One
+- **b.** Two
+- **c.** Three
+- **d.** Four
+**Correct Answer:** b. Two
+**Clinical Explanation:** شرح
+"""
+        with tempfile.TemporaryDirectory() as root:
+            module = Path(root) / "pediatrics"
+            transcripts = module / "Transcripts"
+            transcripts.mkdir(parents=True)
+            (transcripts / "Jaundice 👶.md").write_text(text, encoding="utf-8")
+
+            bank = build_bank(transcripts, "pediatrics")
+
+        self.assertEqual(len(bank.questions), 2)
+        for question in bank.questions:
+            self.assertTrue(question.is_past_exam, question)
+            self.assertTrue(question.is_important, question)
+        self.assertEqual(bank.questions[0].years, (2024,))
+        self.assertEqual(bank.questions[1].years, (2023,))
+
+
 if __name__ == "__main__":
     unittest.main()

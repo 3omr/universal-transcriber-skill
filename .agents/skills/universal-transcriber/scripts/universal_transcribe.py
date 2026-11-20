@@ -2581,10 +2581,10 @@ def canonical_badge_instructions(year_map: dict[int, list[str]]) -> str:
     return (
         f"Verified exam years for this workspace: {verified}. Use only these exact bold "
         "badge forms when evidence supports them: **[IMP]**, **[Past Exams - YYYY]**, "
-        "**[Past Exams - YYYY, YYYY]**, **[Question Bank]**, and "
-        "**[Past Exams - YYYY, YYYY]** with **[Question Bank]** when both roles "
-        "are evidenced, and **[Past Exams (YYYY, YYYY) / IMP]** when the recording "
-        "also confirms the same past-exam point. Never use [Past Exams], "
+        "**[Past Exams - YYYY, YYYY]**, and **[Question Bank]**. Combine badges side by "
+        "side whenever multiple apply — e.g. **[Past Exams - YYYY, YYYY]** **[Question Bank]**, "
+        "**[Past Exams - YYYY]** **[IMP]**, or **[Question Bank]** **[IMP]** when the "
+        "recording also emphasized that exact point. Never use [Past Exams], "
         "[Past year from doctor], or an unverified year."
     )
 
